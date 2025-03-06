@@ -1,0 +1,1437 @@
+openapi: 3.0.2
+info:
+  title: Document Management and AI Chatbot System API
+  description: API for document management, vector search, and AI-powered responses with reinforcement learning capabilities
+  version: 1.0.0
+  contact:
+    name: API Support
+    email: support@example.com
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+servers:
+  - url: /api
+    description: API base URL
+paths:
+  /v1/auth/token:
+    post:
+      tags:
+        - authentication
+      summary: Login to obtain access token
+      description: Authenticates a user and returns access and refresh tokens
+      operationId: login
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TokenRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful authentication
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Token'
+        '401':
+          description: Invalid credentials
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+  /v1/auth/refresh:
+    post:
+      tags:
+        - authentication
+      summary: Refresh access token
+      description: Refreshes an access token using a refresh token
+      operationId: refreshToken
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshTokenRequest'
+        required: true
+      responses:
+        '200':
+          description: Token refreshed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Token'
+        '401':
+          description: Invalid or expired refresh token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+  /v1/auth/logout:
+    post:
+      tags:
+        - authentication
+      summary: Logout user
+      description: Revokes a refresh token, effectively logging the user out
+      operationId: logout
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshTokenRequest'
+        required: true
+      responses:
+        '200':
+          description: Successfully logged out
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: Successfully logged out
+  /v1/auth/register:
+    post:
+      tags:
+        - authentication
+      summary: Register new user
+      description: Registers a new user and returns their information
+      operationId: register
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserCreate'
+        required: true
+      responses:
+        '201':
+          description: User created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '400':
+          description: Username or email already exists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+  /v1/documents/:
+    post:
+      tags:
+        - documents
+      summary: Upload document
+      description: Upload a PDF document for processing and vector embedding
+      operationId: createDocument
+      security:
+        - bearerAuth: []
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: PDF document to upload
+              required:
+                - file
+        required: true
+      responses:
+        '201':
+          description: Document created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Document'
+        '400':
+          description: Invalid file format or size
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+    get:
+      tags:
+        - documents
+      summary: List documents
+      description: Retrieve a list of documents with optional filtering and pagination
+      operationId: getDocuments
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: title
+          in: query
+          description: Filter by document title
+          schema:
+            type: string
+        - name: status
+          in: query
+          description: Filter by document status
+          schema:
+            type: string
+            enum:
+              - processing
+              - available
+              - error
+              - deleted
+        - name: upload_date_from
+          in: query
+          description: Filter by upload date (from)
+          schema:
+            type: string
+            format: date-time
+        - name: upload_date_to
+          in: query
+          description: Filter by upload date (to)
+          schema:
+            type: string
+            format: date-time
+        - name: skip
+          in: query
+          description: Number of records to skip for pagination
+          schema:
+            type: integer
+            default: 0
+            minimum: 0
+        - name: limit
+          in: query
+          description: Maximum number of records to return
+          schema:
+            type: integer
+            default: 100
+            minimum: 1
+            maximum: 1000
+      responses:
+        '200':
+          description: List of documents
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Document'
+                  total:
+                    type: integer
+                    description: Total number of documents matching the filter
+                  skip:
+                    type: integer
+                    description: Number of records skipped
+                  limit:
+                    type: integer
+                    description: Maximum number of records returned
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+  /v1/documents/{document_id}:
+    get:
+      tags:
+        - documents
+      summary: Get document
+      description: Retrieve a specific document by ID
+      operationId: getDocument
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: document_id
+          in: path
+          description: Document ID
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Document details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Document'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+        '403':
+          description: Forbidden - user does not have access to this document
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+        '404':
+          description: Document not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+    delete:
+      tags:
+        - documents
+      summary: Delete document
+      description: Soft delete a document
+      operationId: deleteDocument
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: document_id
+          in: path
+          description: Document ID
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Document deleted successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: Document deleted successfully
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+        '403':
+          description: Forbidden - user does not have access to this document
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+        '404':
+          description: Document not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+  /v1/documents/{document_id}/chunks:
+    get:
+      tags:
+        - documents
+      summary: Get document with chunks
+      description: Retrieve a document with its text chunks
+      operationId: getDocumentWithChunks
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: document_id
+          in: path
+          description: Document ID
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Document with chunks
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentWithChunks'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+        '403':
+          description: Forbidden - user does not have access to this document
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+        '404':
+          description: Document not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+  /v1/documents/{document_id}/download:
+    get:
+      tags:
+        - documents
+      summary: Download document
+      description: Download the original document file
+      operationId: downloadDocument
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: document_id
+          in: path
+          description: Document ID
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Document file
+          content:
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+        '403':
+          description: Forbidden - user does not have access to this document
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+        '404':
+          description: Document not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+  /v1/documents/{document_id}/permanent:
+    delete:
+      tags:
+        - documents
+      summary: Permanently delete document
+      description: Permanently delete a document and its file (admin only)
+      operationId: hardDeleteDocument
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: document_id
+          in: path
+          description: Document ID
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Document permanently deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: Document permanently deleted
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+        '403':
+          description: Forbidden - user is not an admin
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+        '404':
+          description: Document not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+  /v1/query/:
+    post:
+      tags:
+        - query
+      summary: Submit query
+      description: Submit a search query and receive AI-generated response with relevant documents
+      operationId: submitQuery
+      security:
+        - bearerAuth: []
+        - {}
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/QueryCreate'
+        required: true
+      responses:
+        '200':
+          description: Query response with AI-generated answer and relevant documents
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QueryResponse'
+        '400':
+          description: Invalid query parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+    get:
+      tags:
+        - query
+      summary: List queries
+      description: List queries with pagination and filtering
+      operationId: listQueries
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: skip
+          in: query
+          description: Number of records to skip for pagination
+          schema:
+            type: integer
+            default: 0
+            minimum: 0
+        - name: limit
+          in: query
+          description: Maximum number of records to return
+          schema:
+            type: integer
+            default: 100
+            minimum: 1
+            maximum: 1000
+        - name: search_term
+          in: query
+          description: Search term to filter queries
+          schema:
+            type: string
+      responses:
+        '200':
+          description: List of queries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Query'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+  /v1/query/{query_id}:
+    get:
+      tags:
+        - query
+      summary: Get query
+      description: Retrieve a specific query by ID
+      operationId: getQuery
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: query_id
+          in: path
+          description: Query ID
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Query details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Query'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+        '403':
+          description: Forbidden - user does not have access to this query
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+        '404':
+          description: Query not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+  /v1/query/{query_id}/feedback:
+    get:
+      tags:
+        - query
+      summary: Get query with feedback
+      description: Retrieve a specific query with its feedback
+      operationId: getQueryWithFeedback
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: query_id
+          in: path
+          description: Query ID
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Query with feedback
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QueryWithFeedback'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+        '403':
+          description: Forbidden - user does not have access to this query
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+        '404':
+          description: Query not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+  /v1/query/me:
+    get:
+      tags:
+        - query
+      summary: List user queries
+      description: List queries for the current user
+      operationId: listUserQueries
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: skip
+          in: query
+          description: Number of records to skip for pagination
+          schema:
+            type: integer
+            default: 0
+            minimum: 0
+        - name: limit
+          in: query
+          description: Maximum number of records to return
+          schema:
+            type: integer
+            default: 100
+            minimum: 1
+            maximum: 1000
+      responses:
+        '200':
+          description: List of user's queries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Query'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+  /v1/feedback/:
+    post:
+      tags:
+        - feedback
+      summary: Submit feedback
+      description: Submit feedback for a specific query response
+      operationId: submitFeedback
+      security:
+        - bearerAuth: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FeedbackCreate'
+        required: true
+      responses:
+        '201':
+          description: Feedback submitted successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Feedback'
+        '400':
+          description: Invalid feedback data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+        '404':
+          description: Query not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+  /v1/feedback/{feedback_id}:
+    get:
+      tags:
+        - feedback
+      summary: Get feedback
+      description: Get feedback by ID
+      operationId: getFeedback
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: feedback_id
+          in: path
+          description: Feedback ID
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Feedback details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Feedback'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+        '403':
+          description: Forbidden - user does not have access to this feedback
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+        '404':
+          description: Feedback not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+  /v1/feedback/query/{query_id}:
+    get:
+      tags:
+        - feedback
+      summary: Get feedback by query
+      description: Get all feedback for a specific query
+      operationId: getFeedbackByQuery
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: query_id
+          in: path
+          description: Query ID
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: List of feedback for the query
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Feedback'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+        '403':
+          description: Forbidden - user does not have access to this query
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+        '404':
+          description: Query not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+  /v1/feedback/user/me:
+    get:
+      tags:
+        - feedback
+      summary: Get user feedback
+      description: Get all feedback submitted by the current user
+      operationId: getUserFeedback
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: skip
+          in: query
+          description: Number of records to skip for pagination
+          schema:
+            type: integer
+            default: 0
+            minimum: 0
+        - name: limit
+          in: query
+          description: Maximum number of records to return
+          schema:
+            type: integer
+            default: 100
+            minimum: 1
+            maximum: 1000
+      responses:
+        '200':
+          description: List of user's feedback
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Feedback'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+  /v1/feedback/filter:
+    post:
+      tags:
+        - feedback
+      summary: Filter feedback
+      description: Get feedback based on filter criteria
+      operationId: getFilteredFeedback
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: skip
+          in: query
+          description: Number of records to skip for pagination
+          schema:
+            type: integer
+            default: 0
+            minimum: 0
+        - name: limit
+          in: query
+          description: Maximum number of records to return
+          schema:
+            type: integer
+            default: 100
+            minimum: 1
+            maximum: 1000
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FeedbackFilter'
+        required: true
+      responses:
+        '200':
+          description: List of filtered feedback
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Feedback'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+        '403':
+          description: Forbidden - user does not have access to this feedback
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+  /v1/feedback/statistics:
+    post:
+      tags:
+        - feedback
+      summary: Get feedback statistics
+      description: Get statistics for feedback based on filter criteria
+      operationId: getFeedbackStatistics
+      security:
+        - bearerAuth: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FeedbackFilter'
+        required: false
+      responses:
+        '200':
+          description: Feedback statistics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FeedbackStats'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+        '403':
+          description: Forbidden - user does not have access to this feedback
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+  /v1/feedback/reinforce:
+    post:
+      tags:
+        - feedback
+      summary: Trigger reinforcement learning
+      description: Trigger reinforcement learning based on accumulated feedback (admin only)
+      operationId: triggerReinforcementLearning
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Reinforcement learning triggered successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: Reinforcement learning process started
+                  feedback_processed:
+                    type: integer
+                    example: 120
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+        '403':
+          description: Forbidden - user is not an admin
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+  /v1/health/live:
+    get:
+      tags:
+        - health
+      summary: Liveness check
+      description: Simple health check to verify the API is running
+      operationId: checkLiveness
+      responses:
+        '200':
+          description: API is alive
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+  /v1/health/ready:
+    get:
+      tags:
+        - health
+      summary: Readiness check
+      description: Health check to verify the API is ready to accept requests
+      operationId: checkReadiness
+      responses:
+        '200':
+          description: API is ready
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+        '503':
+          description: API is not ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+  /v1/health/dependencies:
+    get:
+      tags:
+        - health
+      summary: Dependencies check
+      description: Comprehensive health check to verify all system dependencies
+      operationId: checkDependencies
+      responses:
+        '200':
+          description: Dependencies status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                  database:
+                    type: string
+                    example: ok
+                  vector_store:
+                    type: string
+                    example: ok
+                  llm_service:
+                    type: string
+                    example: ok
+                  details:
+                    type: object
+                    additionalProperties: true
+components:
+  schemas:
+    Token:
+      type: object
+      properties:
+        access_token:
+          type: string
+          description: JWT access token
+        token_type:
+          type: string
+          description: Token type
+          default: bearer
+        refresh_token:
+          type: string
+          description: JWT refresh token for obtaining new access tokens
+      required:
+        - access_token
+        - token_type
+    TokenRequest:
+      type: object
+      properties:
+        username:
+          type: string
+          description: User's username
+        password:
+          type: string
+          description: User's password
+          format: password
+      required:
+        - username
+        - password
+    RefreshTokenRequest:
+      type: object
+      properties:
+        refresh_token:
+          type: string
+          description: JWT refresh token
+      required:
+        - refresh_token
+    UserCreate:
+      type: object
+      properties:
+        username:
+          type: string
+          description: User's username
+          minLength: 3
+          maxLength: 50
+        email:
+          type: string
+          description: User's email address
+          format: email
+        password:
+          type: string
+          description: User's password
+          format: password
+          minLength: 8
+      required:
+        - username
+        - email
+        - password
+    User:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: User's unique identifier
+        username:
+          type: string
+          description: User's username
+        email:
+          type: string
+          description: User's email address
+          format: email
+        role:
+          type: string
+          description: User's role
+          enum:
+            - admin
+            - regular
+      required:
+        - id
+        - username
+        - email
+        - role
+    Document:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Document's unique identifier
+        title:
+          type: string
+          description: Document title
+          minLength: 3
+          maxLength: 255
+        filename:
+          type: string
+          description: Original filename
+        size_bytes:
+          type: integer
+          description: Document size in bytes
+          minimum: 1
+        upload_date:
+          type: string
+          format: date-time
+          description: Date and time when the document was uploaded
+        status:
+          type: string
+          description: Document processing status
+          enum:
+            - processing
+            - available
+            - error
+            - deleted
+        uploader_id:
+          type: string
+          format: uuid
+          description: ID of the user who uploaded the document
+        uploader:
+          $ref: '#/components/schemas/User'
+      required:
+        - id
+        - title
+        - filename
+        - size_bytes
+        - upload_date
+        - status
+        - uploader_id
+    DocumentChunk:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Chunk's unique identifier
+        document_id:
+          type: string
+          format: uuid
+          description: ID of the document this chunk belongs to
+        chunk_index:
+          type: integer
+          description: Index of this chunk within the document
+        content:
+          type: string
+          description: Text content of the chunk
+        token_count:
+          type: integer
+          description: Number of tokens in the chunk
+        embedding_id:
+          type: string
+          description: ID of the vector embedding for this chunk
+      required:
+        - id
+        - document_id
+        - chunk_index
+        - content
+        - token_count
+    DocumentChunkWithSimilarity:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Chunk's unique identifier
+        document_id:
+          type: string
+          format: uuid
+          description: ID of the document this chunk belongs to
+        content:
+          type: string
+          description: Text content of the chunk
+        similarity_score:
+          type: number
+          format: float
+          description: Similarity score between the chunk and the query
+          minimum: 0
+          maximum: 1
+      required:
+        - id
+        - document_id
+        - content
+        - similarity_score
+    DocumentWithChunks:
+      allOf:
+        - $ref: '#/components/schemas/Document'
+        - type: object
+          properties:
+            chunks:
+              type: array
+              items:
+                $ref: '#/components/schemas/DocumentChunk'
+              description: Document text chunks
+          required:
+            - chunks
+    QueryCreate:
+      type: object
+      properties:
+        query_text:
+          type: string
+          description: Query text
+          minLength: 3
+          maxLength: 1000
+        max_results:
+          type: integer
+          description: Maximum number of results to return
+          default: 5
+          minimum: 1
+          maximum: 20
+        similarity_threshold:
+          type: number
+          format: float
+          description: Minimum similarity score for results
+          default: 0.7
+          minimum: 0
+          maximum: 1
+      required:
+        - query_text
+    Query:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Query's unique identifier
+        user_id:
+          type: string
+          format: uuid
+          description: ID of the user who submitted the query
+        query_text:
+          type: string
+          description: Query text
+        query_time:
+          type: string
+          format: date-time
+          description: Date and time when the query was submitted
+        response_text:
+          type: string
+          description: AI-generated response to the query
+        context_documents:
+          type: object
+          description: Document context used for generating the response
+          additionalProperties: true
+      required:
+        - id
+        - user_id
+        - query_text
+        - query_time
+        - response_text
+    QueryResponse:
+      type: object
+      properties:
+        query_id:
+          type: string
+          format: uuid
+          description: Query's unique identifier
+        query_text:
+          type: string
+          description: Query text
+        response_text:
+          type: string
+          description: AI-generated response to the query
+        relevant_documents:
+          type: array
+          items:
+            $ref: '#/components/schemas/DocumentChunkWithSimilarity'
+          description: Relevant document chunks with similarity scores
+      required:
+        - query_id
+        - query_text
+        - response_text
+        - relevant_documents
+    QueryWithFeedback:
+      allOf:
+        - $ref: '#/components/schemas/Query'
+        - type: object
+          properties:
+            feedback:
+              type: array
+              items:
+                $ref: '#/components/schemas/Feedback'
+              description: Feedback for this query
+          required:
+            - feedback
+    FeedbackCreate:
+      type: object
+      properties:
+        query_id:
+          type: string
+          format: uuid
+          description: ID of the query being rated
+        rating:
+          type: integer
+          description: Rating from 1 to 5
+          minimum: 1
+          maximum: 5
+        comments:
+          type: string
+          description: Optional comments about the response
+      required:
+        - query_id
+        - rating
+    Feedback:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Feedback's unique identifier
+        user_id:
+          type: string
+          format: uuid
+          description: ID of the user who submitted the feedback
+        query_id:
+          type: string
+          format: uuid
+          description: ID of the query being rated
+        rating:
+          type: integer
+          description: Rating from 1 to 5
+          minimum: 1
+          maximum: 5
+        comments:
+          type: string
+          description: Optional comments about the response
+        feedback_time:
+          type: string
+          format: date-time
+          description: Date and time when the feedback was submitted
+      required:
+        - id
+        - user_id
+        - query_id
+        - rating
+        - feedback_time
+    FeedbackFilter:
+      type: object
+      properties:
+        user_id:
+          type: string
+          format: uuid
+          description: Filter by user ID
+        query_id:
+          type: string
+          format: uuid
+          description: Filter by query ID
+        start_date:
+          type: string
+          format: date-time
+          description: Filter by feedback date (from)
+        end_date:
+          type: string
+          format: date-time
+          description: Filter by feedback date (to)
+        min_rating:
+          type: integer
+          description: Filter by minimum rating
+          minimum: 1
+          maximum: 5
+        max_rating:
+          type: integer
+          description: Filter by maximum rating
+          minimum: 1
+          maximum: 5
+    FeedbackStats:
+      type: object
+      properties:
+        average_rating:
+          type: number
+          format: float
+          description: Average rating across all feedback
+        total_feedback:
+          type: integer
+          description: Total number of feedback entries
+        rating_distribution:
+          type: object
+          description: Distribution of ratings
+          additionalProperties:
+            type: integer
+          example:
+            '1': 5
+            '2': 10
+            '3': 20
+            '4': 30
+            '5': 35
+        positive_percentage:
+          type: number
+          format: float
+          description: Percentage of positive feedback (rating 4-5)
+        negative_percentage:
+          type: number
+          format: float
+          description: Percentage of negative feedback (rating 1-2)
+        neutral_percentage:
+          type: number
+          format: float
+          description: Percentage of neutral feedback (rating 3)
+      required:
+        - average_rating
+        - total_feedback
+        - rating_distribution
+    HTTPError:
+      type: object
+      properties:
+        detail:
+          type: string
+          description: Error message
+      required:
+        - detail
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT token obtained from the /auth/token endpoint
+tags:
+  - name: authentication
+    description: Authentication and user management endpoints
+  - name: documents
+    description: Document management endpoints
+  - name: query
+    description: Vector search and query endpoints
+  - name: feedback
+    description: Feedback and reinforcement learning endpoints
+  - name: health
+    description: Health check endpoints
