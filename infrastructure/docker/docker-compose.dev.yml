@@ -1,0 +1,81 @@
+version: '3.8'
+
+services:
+  app:
+    build:
+      context: ../../src/backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      - ../../src/backend:/app
+      - ./data/documents:/app/data/documents
+      - ./data/vector_indices:/app/data/vector_indices
+    environment:
+      - APP_ENV=development
+      - APP_DEBUG=true
+      - APP_API_V1_PREFIX=/api/v1
+      - APP_CORS_ALLOW_ORIGINS=http://localhost:3000,http://localhost:8080
+      - APP_LOG_LEVEL=DEBUG
+      - DB_POSTGRES_USER=postgres
+      - DB_POSTGRES_PASSWORD=postgres
+      - DB_POSTGRES_HOST=db
+      - DB_POSTGRES_PORT=5432
+      - DB_POSTGRES_DB=document_management
+      - DB_ECHO_SQL=true
+      - SECURITY_JWT_SECRET=dev-secret-key-do-not-use-in-production
+      - SECURITY_JWT_ALGORITHM=HS256
+      - SECURITY_ACCESS_TOKEN_EXPIRE_MINUTES=60
+      - VECTOR_VECTOR_INDEX_PATH=/app/data/vector_indices
+      - VECTOR_VECTOR_DIMENSION=768
+      - DOCUMENT_DOCUMENT_STORAGE_PATH=/app/data/documents
+      - DOCUMENT_MAX_DOCUMENT_SIZE_MB=10
+      - LLM_OPENAI_API_KEY=${OPENAI_API_KEY:-your-openai-api-key}
+    depends_on:
+      - db
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload --log-level debug
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  db:
+    image: postgres:14
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=document_management
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    environment:
+      - PGADMIN_DEFAULT_EMAIL=admin@example.com
+      - PGADMIN_DEFAULT_PASSWORD=admin
+      - PGADMIN_LISTEN_PORT=5050
+    ports:
+      - "5050:5050"
+    depends_on:
+      - db
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+
+volumes:
+  postgres_data:
+    description: Persistent volume for PostgreSQL data storage
+  pgadmin_data:
+    description: Persistent volume for PgAdmin configuration and data
+
+networks:
+  app_network:
+    description: Network for communication between application services
