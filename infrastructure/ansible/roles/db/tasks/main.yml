@@ -1,0 +1,370 @@
+---
+# Ansible tasks file for the database role that installs, configures, and manages 
+# PostgreSQL database for the Document Management and AI Chatbot System
+
+# PostgreSQL Installation
+- name: Install PostgreSQL repository key
+  ansible.builtin.apt_key:
+    url: https://www.postgresql.org/media/keys/ACCC4CF8.asc
+    state: present
+  tags:
+    - db
+    - postgresql
+    - install
+
+- name: Add PostgreSQL repository
+  ansible.builtin.apt_repository:
+    repo: deb http://apt.postgresql.org/pub/repos/apt/ {{ ansible_distribution_release }}-pgdg main
+    state: present
+  tags:
+    - db
+    - postgresql
+    - install
+
+- name: Install PostgreSQL packages
+  ansible.builtin.apt:
+    name:
+      - postgresql-14
+      - postgresql-client-14
+      - postgresql-contrib-14
+      - libpq-dev
+      - python3-psycopg2
+      - postgresql-14-repmgr
+    state: present
+    update_cache: true
+  tags:
+    - db
+    - postgresql
+    - install
+
+- name: Ensure PostgreSQL service is running
+  ansible.builtin.service:
+    name: postgresql
+    state: started
+    enabled: true
+  tags:
+    - db
+    - postgresql
+    - service
+
+# Directory Setup
+- name: Create database directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: postgres
+    group: postgres
+    mode: '0700'
+  loop:
+    - "{{ postgresql_data_dir | default('/var/lib/postgresql/14/main') }}"
+    - "{{ postgresql_backup_dir | default('/var/lib/postgresql/backups') }}"
+    - "{{ postgresql_archive_dir | default('/var/lib/postgresql/archive') }}"
+  tags:
+    - db
+    - postgresql
+    - setup
+
+# PostgreSQL Configuration
+- name: Configure PostgreSQL authentication
+  ansible.builtin.template:
+    src: templates/pg_hba.conf.j2
+    dest: "{{ postgresql_config_dir | default('/etc/postgresql/14/main') }}/pg_hba.conf"
+    owner: postgres
+    group: postgres
+    mode: '0640'
+  notify: restart postgresql
+  tags:
+    - db
+    - postgresql
+    - config
+
+- name: Configure PostgreSQL main configuration
+  ansible.builtin.template:
+    src: templates/postgresql.conf.j2
+    dest: "{{ postgresql_config_dir | default('/etc/postgresql/14/main') }}/postgresql.conf"
+    owner: postgres
+    group: postgres
+    mode: '0640'
+  notify: restart postgresql
+  tags:
+    - db
+    - postgresql
+    - config
+
+# Database Setup
+- name: Create application database
+  community.postgresql.postgresql_db:
+    name: "{{ db_name }}"
+    encoding: UTF-8
+    lc_collate: en_US.UTF-8
+    lc_ctype: en_US.UTF-8
+    template: template0
+    state: present
+  become: true
+  become_user: postgres
+  tags:
+    - db
+    - postgresql
+    - database
+
+- name: Create application database user
+  community.postgresql.postgresql_user:
+    name: "{{ db_user }}"
+    password: "{{ db_password }}"
+    role_attr_flags: CREATEDB,NOSUPERUSER
+    state: present
+  become: true
+  become_user: postgres
+  tags:
+    - db
+    - postgresql
+    - user
+
+- name: Grant privileges to application user
+  community.postgresql.postgresql_privs:
+    db: "{{ db_name }}"
+    role: "{{ db_user }}"
+    type: database
+    privs: ALL
+    state: present
+  become: true
+  become_user: postgres
+  tags:
+    - db
+    - postgresql
+    - privileges
+
+- name: Enable required PostgreSQL extensions
+  community.postgresql.postgresql_ext:
+    db: "{{ db_name }}"
+    name: "{{ item }}"
+    state: present
+  loop:
+    - pg_stat_statements
+    - pgcrypto
+    - uuid-ossp
+  become: true
+  become_user: postgres
+  tags:
+    - db
+    - postgresql
+    - extensions
+
+# Backup Configuration
+- name: Configure WAL archiving
+  ansible.builtin.lineinfile:
+    path: "{{ postgresql_config_dir | default('/etc/postgresql/14/main') }}/postgresql.conf"
+    regexp: '^#?wal_level ='
+    line: 'wal_level = replica'
+  notify: restart postgresql
+  tags:
+    - db
+    - postgresql
+    - backup
+
+- name: Configure archive mode
+  ansible.builtin.lineinfile:
+    path: "{{ postgresql_config_dir | default('/etc/postgresql/14/main') }}/postgresql.conf"
+    regexp: '^#?archive_mode ='
+    line: 'archive_mode = on'
+  notify: restart postgresql
+  tags:
+    - db
+    - postgresql
+    - backup
+
+- name: Configure archive command
+  ansible.builtin.lineinfile:
+    path: "{{ postgresql_config_dir | default('/etc/postgresql/14/main') }}/postgresql.conf"
+    regexp: '^#?archive_command ='
+    line: "archive_command = 'test ! -f {{ postgresql_archive_dir | default('/var/lib/postgresql/archive') }}/%f && cp %p {{ postgresql_archive_dir | default('/var/lib/postgresql/archive') }}/%f'"
+  notify: restart postgresql
+  tags:
+    - db
+    - postgresql
+    - backup
+
+- name: Create database backup script
+  ansible.builtin.template:
+    src: templates/backup_database.sh.j2
+    dest: /usr/local/bin/backup_database.sh
+    owner: postgres
+    group: postgres
+    mode: '0755'
+  tags:
+    - db
+    - postgresql
+    - backup
+
+- name: Set up cron job for database backups
+  ansible.builtin.cron:
+    name: "Database backup"
+    job: "/usr/local/bin/backup_database.sh >> {{ postgresql_backup_dir | default('/var/lib/postgresql/backups') }}/backup.log 2>&1"
+    hour: '1'
+    minute: '0'
+    user: postgres
+  tags:
+    - db
+    - postgresql
+    - backup
+
+- name: Create database backup verification script
+  ansible.builtin.template:
+    src: templates/verify_backup.sh.j2
+    dest: /usr/local/bin/verify_backup.sh
+    owner: postgres
+    group: postgres
+    mode: '0755'
+  tags:
+    - db
+    - postgresql
+    - backup
+
+- name: Set up cron job for backup verification
+  ansible.builtin.cron:
+    name: "Backup verification"
+    job: "/usr/local/bin/verify_backup.sh >> {{ postgresql_backup_dir | default('/var/lib/postgresql/backups') }}/verify.log 2>&1"
+    hour: '2'
+    minute: '0'
+    user: postgres
+  tags:
+    - db
+    - postgresql
+    - backup
+
+# Performance Tuning
+- name: Configure PostgreSQL for performance
+  ansible.builtin.template:
+    src: templates/performance.conf.j2
+    dest: "{{ postgresql_config_dir | default('/etc/postgresql/14/main') }}/conf.d/performance.conf"
+    owner: postgres
+    group: postgres
+    mode: '0640'
+  notify: restart postgresql
+  tags:
+    - db
+    - postgresql
+    - performance
+
+# Replication Setup
+- name: Configure PostgreSQL for replication
+  ansible.builtin.template:
+    src: templates/replication.conf.j2
+    dest: "{{ postgresql_config_dir | default('/etc/postgresql/14/main') }}/conf.d/replication.conf"
+    owner: postgres
+    group: postgres
+    mode: '0640'
+  notify: restart postgresql
+  when: postgresql_enable_replication | default(false)
+  tags:
+    - db
+    - postgresql
+    - replication
+
+- name: Create replication user
+  community.postgresql.postgresql_user:
+    name: "{{ postgresql_replication_user | default('replicator') }}"
+    password: "{{ postgresql_replication_password }}"
+    role_attr_flags: REPLICATION,NOSUPERUSER
+    state: present
+  become: true
+  become_user: postgres
+  when: postgresql_enable_replication | default(false)
+  tags:
+    - db
+    - postgresql
+    - replication
+
+# Monitoring Setup
+- name: Configure PostgreSQL monitoring
+  ansible.builtin.template:
+    src: templates/monitoring.conf.j2
+    dest: "{{ postgresql_config_dir | default('/etc/postgresql/14/main') }}/conf.d/monitoring.conf"
+    owner: postgres
+    group: postgres
+    mode: '0640'
+  notify: restart postgresql
+  tags:
+    - db
+    - postgresql
+    - monitoring
+
+- name: Create PostgreSQL monitoring user
+  community.postgresql.postgresql_user:
+    name: "{{ postgresql_monitoring_user | default('monitoring') }}"
+    password: "{{ postgresql_monitoring_password }}"
+    role_attr_flags: NOSUPERUSER,NOCREATEDB
+    state: present
+  become: true
+  become_user: postgres
+  tags:
+    - db
+    - postgresql
+    - monitoring
+
+- name: Grant monitoring privileges
+  community.postgresql.postgresql_privs:
+    db: postgres
+    role: "{{ postgresql_monitoring_user | default('monitoring') }}"
+    type: table
+    objs: pg_stat_activity
+    schema: pg_catalog
+    privs: SELECT
+    state: present
+  become: true
+  become_user: postgres
+  tags:
+    - db
+    - postgresql
+    - monitoring
+
+# Logging and Security
+- name: Configure log rotation for PostgreSQL logs
+  ansible.builtin.template:
+    src: templates/postgresql_logrotate.j2
+    dest: /etc/logrotate.d/postgresql
+    owner: root
+    group: root
+    mode: '0644'
+  tags:
+    - db
+    - postgresql
+    - logging
+
+- name: Configure firewall for PostgreSQL
+  ansible.builtin.ufw:
+    rule: allow
+    port: "{{ postgresql_port | default('5432') }}"
+    proto: tcp
+  tags:
+    - db
+    - postgresql
+    - security
+
+# Maintenance Tasks
+- name: Create database maintenance script
+  ansible.builtin.template:
+    src: templates/maintenance.sh.j2
+    dest: /usr/local/bin/db_maintenance.sh
+    owner: postgres
+    group: postgres
+    mode: '0755'
+  tags:
+    - db
+    - postgresql
+    - maintenance
+
+- name: Set up cron job for database maintenance
+  ansible.builtin.cron:
+    name: "Database maintenance"
+    job: "/usr/local/bin/db_maintenance.sh >> {{ postgresql_backup_dir | default('/var/lib/postgresql/backups') }}/maintenance.log 2>&1"
+    hour: '3'
+    minute: '0'
+    weekday: '0'
+    user: postgres
+  tags:
+    - db
+    - postgresql
+    - maintenance
+
+# Handlers are defined in handlers/main.yml but referenced here
