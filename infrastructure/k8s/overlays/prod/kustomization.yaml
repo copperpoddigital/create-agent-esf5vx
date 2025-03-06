@@ -1,0 +1,80 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Reference the base directory
+resources:
+- ../../base
+
+# Production namespace
+namespace: document-management-prod
+
+# Common labels for all resources
+commonLabels:
+  environment: production
+  app: document-management
+  managed-by: kustomize
+
+# Update image references
+images:
+- name: $(IMAGE_REPOSITORY)/document-management-app
+  newName: document-management-registry.prod/document-management-app
+  newTag: $(IMAGE_TAG)
+
+# Set replica count for high availability
+replicas:
+- name: document-management-app
+  count: 3
+
+# Production-specific configuration
+configMapGenerator:
+- name: app-config
+  behavior: merge
+  literals:
+  - ENV=production
+  - DEBUG=false
+  - LOG_LEVEL=INFO
+  - POSTGRES_SERVER=postgres-prod-service
+  - POSTGRES_DB=document_management_prod
+  - POOL_SIZE=20
+  - MAX_OVERFLOW=30
+  - VECTOR_DIMENSION=768
+  - INDEX_TYPE=IVFFlat
+  - NLIST=100
+  - DEFAULT_TOP_K=5
+  - USE_GPU=true
+  - LLM_MODEL=gpt-3.5-turbo
+  - TEMPERATURE=0.7
+  - MAX_TOKENS=1024
+  - REQUEST_TIMEOUT=30
+  - USE_CACHE=true
+  - CACHE_TTL_SECONDS=3600
+  - MAX_DOCUMENT_SIZE_MB=10
+  - ENABLE_METRICS=true
+  - ALLOWED_HOSTS=api.document-management.com
+  - RATE_LIMIT_PER_MINUTE=60
+  - ENABLE_REINFORCEMENT_LEARNING=true
+  - RL_UPDATE_FREQUENCY_HOURS=24
+
+# Production secrets
+secretGenerator:
+- name: app-secrets
+  behavior: merge
+  envs:
+  - prod-secrets.env
+
+# Apply production-specific patches
+patchesStrategicMerge:
+- patches/deployment-patch.yaml
+- patches/ingress-patch.yaml
+- patches/service-patch.yaml
+- patches/hpa-patch.yaml
+
+# Define variables for reference in resources
+vars:
+- name: INGRESS_HOST
+  objref:
+    kind: ConfigMap
+    name: app-config
+    apiVersion: v1
+  fieldref:
+    fieldpath: data.ALLOWED_HOSTS
