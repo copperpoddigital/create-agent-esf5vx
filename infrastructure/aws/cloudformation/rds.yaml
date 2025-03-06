@@ -1,0 +1,368 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  RDS PostgreSQL Database for Document Management and AI Chatbot System.
+  This template creates a secure, highly available PostgreSQL database with appropriate
+  configuration for storing document metadata, user information, and vector search data.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Project Information
+        Parameters:
+          - ProjectName
+          - Environment
+          - VPCStackName
+      - Label:
+          default: Database Configuration
+        Parameters:
+          - DBName
+          - DBUsername
+          - DBPassword
+          - DBInstanceClass
+          - DBAllocatedStorage
+      - Label:
+          default: Security Configuration
+        Parameters:
+          - ApplicationSecurityGroupId
+      - Label:
+          default: Monitoring Configuration
+        Parameters:
+          - MonitoringRoleArn
+          - AlarmTopicArn
+    ParameterLabels:
+      ProjectName:
+        default: Project Name
+      Environment:
+        default: Environment
+      VPCStackName:
+        default: VPC Stack Name
+      ApplicationSecurityGroupId:
+        default: Application Security Group ID
+      DBName:
+        default: Database Name
+      DBUsername:
+        default: Database Username
+      DBPassword:
+        default: Database Password
+      DBInstanceClass:
+        default: Database Instance Class
+      DBAllocatedStorage:
+        default: Database Storage (GB)
+      MonitoringRoleArn:
+        default: Monitoring Role ARN
+      AlarmTopicArn:
+        default: Alarm Topic ARN
+
+Parameters:
+  ProjectName:
+    Type: String
+    Description: Name of the project, used for resource naming and tagging
+    Default: docmgmt-chatbot
+  
+  Environment:
+    Type: String
+    Description: Deployment environment (dev, staging, prod)
+    Default: dev
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+  
+  VPCStackName:
+    Type: String
+    Description: Name of the VPC CloudFormation stack to import values from
+    Default: docmgmt-chatbot-vpc
+  
+  ApplicationSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: Security group ID of the application tier that will connect to the database
+  
+  DBName:
+    Type: String
+    Description: Name of the PostgreSQL database
+    Default: docaichatbot
+    AllowedPattern: "[a-zA-Z][a-zA-Z0-9_]*"
+    MinLength: 1
+    MaxLength: 63
+  
+  DBUsername:
+    Type: String
+    Description: Username for the database
+    Default: dbadmin
+    AllowedPattern: "[a-zA-Z][a-zA-Z0-9_]*"
+    MinLength: 1
+    MaxLength: 16
+    NoEcho: true
+  
+  DBPassword:
+    Type: String
+    Description: Password for the database
+    MinLength: 8
+    MaxLength: 41
+    NoEcho: true
+  
+  DBInstanceClass:
+    Type: String
+    Description: Database instance class
+    Default: db.t3.medium
+    AllowedValues:
+      - db.t3.micro
+      - db.t3.small
+      - db.t3.medium
+      - db.t3.large
+      - db.m5.large
+      - db.m5.xlarge
+      - db.m5.2xlarge
+      - db.r5.large
+      - db.r5.xlarge
+  
+  DBAllocatedStorage:
+    Type: Number
+    Description: Allocated storage for the database in GB
+    Default: 20
+    MinValue: 20
+    MaxValue: 100
+  
+  MonitoringRoleArn:
+    Type: String
+    Description: ARN of the IAM role for RDS enhanced monitoring
+    Default: ""
+  
+  AlarmTopicArn:
+    Type: String
+    Description: ARN of the SNS topic for CloudWatch alarms
+    Default: ""
+
+Conditions:
+  IsProd: !Equals [!Ref Environment, prod]
+  IsStaging: !Equals [!Ref Environment, staging]
+  IsProdOrStaging: !Or [!Condition IsProd, !Condition IsStaging]
+  HasAlarmTopic: !Not [!Equals [!Ref AlarmTopicArn, ""]]
+
+Resources:
+  # DB Subnet Group
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupName: !Sub ${ProjectName}-${Environment}-db-subnet-group
+      DBSubnetGroupDescription: !Sub Subnet group for ${ProjectName} ${Environment} database
+      SubnetIds: !Split [',', !ImportValue !Sub ${VPCStackName}-DatabaseSubnets]
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-db-subnet-group
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # Security Group for RDS
+  DBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${ProjectName}-${Environment}-db-sg
+      GroupDescription: Security group for RDS PostgreSQL database
+      VpcId: !ImportValue !Sub ${VPCStackName}-VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref ApplicationSecurityGroupId
+          Description: PostgreSQL access from application tier
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-db-sg
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # Parameter Group for PostgreSQL
+  DBParameterGroup:
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      Family: postgres14
+      Description: !Sub PostgreSQL parameter group for ${ProjectName} ${Environment}
+      Parameters:
+        log_connections: '1'
+        log_disconnections: '1'
+        log_statement: 'ddl'
+        shared_buffers: '{DBInstanceClassMemory/32768}MB'
+        work_mem: '16MB'
+        maintenance_work_mem: '128MB'
+        max_connections: '100'
+        random_page_cost: '1.1'
+        effective_cache_size: '{DBInstanceClassMemory/16384}MB'
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-db-params
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # Store DB Credentials in Secrets Manager
+  DBCredentialsSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub ${ProjectName}/${Environment}/db-credentials
+      Description: !Sub Database credentials for ${ProjectName} ${Environment}
+      SecretString: !Join ['', ['{"username":"', !Ref DBUsername, '","password":"', !Ref DBPassword, '","dbname":"', !Ref DBName, '","engine":"postgres"}']]
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-db-credentials
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # RDS Instance
+  DBInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: !Sub ${ProjectName}-${Environment}-db
+      Engine: postgres
+      EngineVersion: '14.6'
+      DBInstanceClass: !Ref DBInstanceClass
+      AllocatedStorage: !Ref DBAllocatedStorage
+      StorageType: gp3
+      StorageEncrypted: true
+      DBName: !Ref DBName
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Ref DBPassword
+      Port: 5432
+      VPCSecurityGroups:
+        - !Ref DBSecurityGroup
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      DBParameterGroupName: !Ref DBParameterGroup
+      MultiAZ: !If [IsProdOrStaging, true, false]
+      BackupRetentionPeriod: !If [IsProd, 30, !If [IsStaging, 7, 1]]
+      PreferredBackupWindow: 03:00-05:00
+      PreferredMaintenanceWindow: sun:05:00-sun:07:00
+      AutoMinorVersionUpgrade: true
+      DeletionProtection: !If [IsProdOrStaging, true, false]
+      CopyTagsToSnapshot: true
+      EnablePerformanceInsights: true
+      PerformanceInsightsRetentionPeriod: 7
+      MonitoringInterval: 60
+      MonitoringRoleArn: !If [IsProdOrStaging, !Ref MonitoringRoleArn, !Ref 'AWS::NoValue']
+      EnableCloudwatchLogsExports:
+        - postgresql
+        - upgrade
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-db
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # CloudWatch Alarms (only in prod and staging)
+  DBCPUUtilizationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: IsProdOrStaging
+    Properties:
+      AlarmName: !Sub ${ProjectName}-${Environment}-db-high-cpu
+      AlarmDescription: Alarm when database CPU exceeds 80% for 5 minutes
+      Namespace: AWS/RDS
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref DBInstance
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 3
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions: !If [HasAlarmTopic, [!Ref AlarmTopicArn], !Ref 'AWS::NoValue']
+      OKActions: !If [HasAlarmTopic, [!Ref AlarmTopicArn], !Ref 'AWS::NoValue']
+      TreatMissingData: missing
+
+  DBFreeStorageSpaceAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: IsProdOrStaging
+    Properties:
+      AlarmName: !Sub ${ProjectName}-${Environment}-db-low-storage
+      AlarmDescription: Alarm when database free storage space is less than 10GB
+      Namespace: AWS/RDS
+      MetricName: FreeStorageSpace
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref DBInstance
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 3
+      Threshold: 10737418240  # 10GB in bytes
+      ComparisonOperator: LessThanThreshold
+      AlarmActions: !If [HasAlarmTopic, [!Ref AlarmTopicArn], !Ref 'AWS::NoValue']
+      OKActions: !If [HasAlarmTopic, [!Ref AlarmTopicArn], !Ref 'AWS::NoValue']
+      TreatMissingData: missing
+
+  DBConnectionCountAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: IsProdOrStaging
+    Properties:
+      AlarmName: !Sub ${ProjectName}-${Environment}-db-high-connections
+      AlarmDescription: Alarm when database connections exceed 80% of maximum
+      Namespace: AWS/RDS
+      MetricName: DatabaseConnections
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref DBInstance
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 3
+      Threshold: 80  # 80% of max_connections
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions: !If [HasAlarmTopic, [!Ref AlarmTopicArn], !Ref 'AWS::NoValue']
+      OKActions: !If [HasAlarmTopic, [!Ref AlarmTopicArn], !Ref 'AWS::NoValue']
+      TreatMissingData: missing
+
+Outputs:
+  DBEndpoint:
+    Description: Connection endpoint of the RDS instance
+    Value: !GetAtt DBInstance.Endpoint.Address
+    Export:
+      Name: !Sub ${AWS::StackName}-DBEndpoint
+
+  DBPort:
+    Description: Port of the RDS instance
+    Value: !GetAtt DBInstance.Endpoint.Port
+    Export:
+      Name: !Sub ${AWS::StackName}-DBPort
+
+  DBName:
+    Description: Name of the database
+    Value: !Ref DBName
+    Export:
+      Name: !Sub ${AWS::StackName}-DBName
+
+  DBSecurityGroupId:
+    Description: ID of the security group for the RDS instance
+    Value: !Ref DBSecurityGroup
+    Export:
+      Name: !Sub ${AWS::StackName}-DBSecurityGroupId
+
+  DBSecretArn:
+    Description: ARN of the secret containing database credentials
+    Value: !Ref DBCredentialsSecret
+    Export:
+      Name: !Sub ${AWS::StackName}-DBSecretArn
+
+  DBSubnetGroupName:
+    Description: Name of the database subnet group
+    Value: !Ref DBSubnetGroup
+    Export:
+      Name: !Sub ${AWS::StackName}-DBSubnetGroupName
+
+  DBParameterGroupName:
+    Description: Name of the database parameter group
+    Value: !Ref DBParameterGroup
+    Export:
+      Name: !Sub ${AWS::StackName}-DBParameterGroupName
+
+  DBInstanceIdentifier:
+    Description: Identifier of the RDS instance
+    Value: !Ref DBInstance
+    Export:
+      Name: !Sub ${AWS::StackName}-DBInstanceIdentifier
