@@ -1,0 +1,323 @@
+---
+# Common role: Base system configurations, security hardening, and monitoring setup
+# ansible.builtin package version: core
+
+# System Preparation: Update and install essential packages
+- name: Update apt cache
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+  tags:
+    - system
+    - packages
+
+- name: Upgrade installed packages
+  ansible.builtin.apt:
+    upgrade: safe
+  tags:
+    - system
+    - packages
+
+- name: Install essential packages
+  ansible.builtin.apt:
+    name:
+      - apt-transport-https
+      - ca-certificates
+      - curl
+      - gnupg-agent
+      - software-properties-common
+      - python3
+      - python3-pip
+      - vim
+      - htop
+      - tmux
+      - git
+      - unzip
+      - net-tools
+      - ntp
+      - fail2ban
+    state: present
+  tags:
+    - system
+    - packages
+
+- name: Set timezone
+  ansible.builtin.timezone:
+    name: "{{ system_timezone | default('UTC') }}"
+  tags:
+    - system
+    - timezone
+
+- name: Configure NTP
+  ansible.builtin.template:
+    src: templates/ntp.conf.j2
+    dest: /etc/ntp.conf
+    owner: root
+    group: root
+    mode: '0644'
+  notify: restart ntp
+  tags:
+    - system
+    - ntp
+
+- name: Ensure NTP service is running
+  ansible.builtin.service:
+    name: ntp
+    state: started
+    enabled: true
+  tags:
+    - system
+    - ntp
+
+# Security Hardening: SSH, fail2ban, and system security configurations
+- name: Configure SSH security
+  ansible.builtin.template:
+    src: templates/sshd_config.j2
+    dest: /etc/ssh/sshd_config
+    owner: root
+    group: root
+    mode: '0600'
+  notify: restart ssh
+  tags:
+    - security
+    - ssh
+
+- name: Configure fail2ban
+  ansible.builtin.template:
+    src: templates/fail2ban.local.j2
+    dest: /etc/fail2ban/jail.local
+    owner: root
+    group: root
+    mode: '0644'
+  notify: restart fail2ban
+  tags:
+    - security
+    - fail2ban
+
+- name: Ensure fail2ban service is running
+  ansible.builtin.service:
+    name: fail2ban
+    state: started
+    enabled: true
+  tags:
+    - security
+    - fail2ban
+
+- name: Set up automatic security updates
+  ansible.builtin.apt:
+    name: unattended-upgrades
+    state: present
+  tags:
+    - security
+    - updates
+
+- name: Configure automatic security updates
+  ansible.builtin.template:
+    src: templates/20auto-upgrades.j2
+    dest: /etc/apt/apt.conf.d/20auto-upgrades
+    owner: root
+    group: root
+    mode: '0644'
+  tags:
+    - security
+    - updates
+
+- name: Configure unattended-upgrades
+  ansible.builtin.template:
+    src: templates/50unattended-upgrades.j2
+    dest: /etc/apt/apt.conf.d/50unattended-upgrades
+    owner: root
+    group: root
+    mode: '0644'
+  tags:
+    - security
+    - updates
+
+- name: Set kernel parameters for security
+  ansible.builtin.sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    state: present
+    reload: true
+  loop:
+    - { key: "net.ipv4.conf.all.accept_redirects", value: "0" }
+    - { key: "net.ipv4.conf.all.send_redirects", value: "0" }
+    - { key: "net.ipv4.conf.all.accept_source_route", value: "0" }
+    - { key: "net.ipv4.conf.all.log_martians", value: "1" }
+    - { key: "net.ipv4.icmp_echo_ignore_broadcasts", value: "1" }
+    - { key: "net.ipv4.tcp_syncookies", value: "1" }
+  tags:
+    - security
+    - kernel
+
+# Performance Optimization: Kernel parameters and resource limits
+- name: Set kernel parameters for performance
+  ansible.builtin.sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    state: present
+    reload: true
+  loop:
+    - { key: "net.ipv4.tcp_fin_timeout", value: "20" }
+    - { key: "net.ipv4.tcp_keepalive_time", value: "1200" }
+    - { key: "net.ipv4.tcp_max_syn_backlog", value: "2048" }
+    - { key: "net.ipv4.tcp_tw_reuse", value: "1" }
+    - { key: "net.core.somaxconn", value: "4096" }
+    - { key: "vm.swappiness", value: "10" }
+  tags:
+    - system
+    - kernel
+    - performance
+
+- name: Set resource limits
+  ansible.builtin.pam_limits:
+    domain: "{{ item.domain }}"
+    limit_type: "{{ item.type }}"
+    limit_item: "{{ item.item }}"
+    value: "{{ item.value }}"
+  loop:
+    - { domain: '*', type: 'soft', item: 'nofile', value: '65536' }
+    - { domain: '*', type: 'hard', item: 'nofile', value: '65536' }
+    - { domain: '*', type: 'soft', item: 'nproc', value: '4096' }
+    - { domain: '*', type: 'hard', item: 'nproc', value: '4096' }
+  tags:
+    - system
+    - limits
+
+# Monitoring and Logging: Set up monitoring agents and configure logging
+- name: Configure system logging
+  ansible.builtin.template:
+    src: templates/rsyslog.conf.j2
+    dest: /etc/rsyslog.conf
+    owner: root
+    group: root
+    mode: '0644'
+  notify: restart rsyslog
+  tags:
+    - system
+    - logging
+
+- name: Configure logrotate
+  ansible.builtin.template:
+    src: templates/logrotate.conf.j2
+    dest: /etc/logrotate.conf
+    owner: root
+    group: root
+    mode: '0644'
+  tags:
+    - system
+    - logging
+
+- name: Install monitoring agent
+  ansible.builtin.apt:
+    name:
+      - prometheus-node-exporter
+    state: present
+  when: enable_monitoring | bool
+  tags:
+    - monitoring
+
+- name: Configure monitoring agent
+  ansible.builtin.template:
+    src: templates/node_exporter.j2
+    dest: /etc/default/prometheus-node-exporter
+    owner: root
+    group: root
+    mode: '0644'
+  notify: restart node_exporter
+  when: enable_monitoring | bool
+  tags:
+    - monitoring
+
+- name: Enable monitoring agent service
+  ansible.builtin.service:
+    name: prometheus-node-exporter
+    state: started
+    enabled: true
+  when: enable_monitoring | bool
+  tags:
+    - monitoring
+
+# Health Checks and Maintenance: Scripts and scheduled tasks
+- name: Create system health check script
+  ansible.builtin.template:
+    src: templates/health_check.sh.j2
+    dest: /usr/local/bin/health_check.sh
+    owner: root
+    group: root
+    mode: '0755'
+  tags:
+    - monitoring
+    - health
+
+- name: Set up cron job for health checks
+  ansible.builtin.cron:
+    name: "System health check"
+    job: "/usr/local/bin/health_check.sh >> /var/log/health_check.log 2>&1"
+    minute: "*/15"
+    user: root
+  when: enable_monitoring | bool
+  tags:
+    - monitoring
+    - health
+
+- name: Create system maintenance scripts directory
+  ansible.builtin.file:
+    path: /usr/local/scripts
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  tags:
+    - system
+    - maintenance
+
+- name: Create disk space cleanup script
+  ansible.builtin.template:
+    src: templates/cleanup_disk_space.sh.j2
+    dest: /usr/local/scripts/cleanup_disk_space.sh
+    owner: root
+    group: root
+    mode: '0755'
+  tags:
+    - system
+    - maintenance
+
+- name: Set up cron job for disk space cleanup
+  ansible.builtin.cron:
+    name: "Disk space cleanup"
+    job: "/usr/local/scripts/cleanup_disk_space.sh >> /var/log/cleanup.log 2>&1"
+    hour: "3"
+    minute: "0"
+    weekday: "0"
+    user: root
+  tags:
+    - system
+    - maintenance
+
+# System Configuration: Swap, hostname, and hosts file
+- name: Configure swap file
+  ansible.builtin.include_tasks:
+    file: swap.yml
+  when: configure_swap | bool
+  tags:
+    - system
+    - swap
+
+- name: Configure hostname
+  ansible.builtin.hostname:
+    name: "{{ inventory_hostname }}"
+  tags:
+    - system
+    - hostname
+
+- name: Update /etc/hosts
+  ansible.builtin.template:
+    src: templates/hosts.j2
+    dest: /etc/hosts
+    owner: root
+    group: root
+    mode: '0644'
+  tags:
+    - system
+    - hostname
