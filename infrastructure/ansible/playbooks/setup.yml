@@ -1,0 +1,240 @@
+---
+# Setup Document Management and AI Chatbot System Infrastructure
+# This playbook handles system preparation, package installation, security configuration,
+# and application environment setup across all target servers.
+
+- name: Setup Document Management and AI Chatbot System Infrastructure
+  hosts: all
+  become: true
+  vars_files:
+    - "../vars/main.yml"
+    - "../vars/{{ environment }}.yml"
+
+  pre_tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: true
+        cache_valid_time: 3600
+      tags:
+        - system
+        - packages
+
+    - name: Install prerequisite packages
+      apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - gnupg-agent
+          - software-properties-common
+          - python3
+          - python3-pip
+        state: present
+      tags:
+        - system
+        - packages
+
+    - name: Check if application directory exists
+      stat:
+        path: "{{ app_base_dir }}"
+      register: app_dir_check
+
+    - name: Create application group
+      group:
+        name: "{{ app_group }}"
+        system: true
+        state: present
+      tags:
+        - system
+        - users
+
+    - name: Create application user
+      user:
+        name: "{{ app_user }}"
+        group: "{{ app_group }}"
+        shell: /bin/bash
+        system: true
+        create_home: true
+      tags:
+        - system
+        - users
+
+  roles:
+    - role: app
+      tags: [app]
+      when: setup_app | default(true)
+
+    - role: db
+      tags: [db]
+      when: setup_database | default(true)
+
+  tasks:
+    - name: Configure firewall - allow SSH
+      ufw:
+        rule: allow
+        name: OpenSSH
+      tags:
+        - security
+        - firewall
+
+    - name: Configure firewall - allow HTTP/HTTPS
+      ufw:
+        rule: allow
+        port: "{{ item }}"
+        proto: tcp
+      loop:
+        - '80'
+        - '443'
+      tags:
+        - security
+        - firewall
+
+    - name: Configure firewall - allow application port
+      ufw:
+        rule: allow
+        port: "{{ app_port }}"
+        proto: tcp
+      tags:
+        - security
+        - firewall
+
+    - name: Enable firewall
+      ufw:
+        state: enabled
+        policy: deny
+      tags:
+        - security
+        - firewall
+
+    - name: Create application directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        mode: '0755'
+      loop:
+        - "{{ app_base_dir }}"
+        - "{{ app_base_dir }}/data"
+        - "{{ app_base_dir }}/data/documents"
+        - "{{ app_base_dir }}/data/vector_indices"
+        - "{{ app_base_dir }}/logs"
+        - "{{ app_base_dir }}/releases"
+        - "{{ app_base_dir }}/backups"
+        - "{{ app_base_dir }}/config"
+      tags:
+        - app
+        - directories
+
+    - name: Set kernel parameters for performance
+      sysctl:
+        name: "{{ item.key }}"
+        value: "{{ item.value }}"
+        state: present
+        reload: true
+      loop:
+        - { key: net.ipv4.tcp_fin_timeout, value: '20' }
+        - { key: net.ipv4.tcp_keepalive_time, value: '1200' }
+        - { key: net.ipv4.tcp_max_syn_backlog, value: '2048' }
+        - { key: net.ipv4.tcp_tw_reuse, value: '1' }
+        - { key: net.core.somaxconn, value: '4096' }
+        - { key: vm.swappiness, value: '10' }
+      tags:
+        - system
+        - kernel
+
+    - name: Set up logrotate for application logs
+      template:
+        src: ../templates/logrotate.j2
+        dest: /etc/logrotate.d/{{ app_name }}
+        owner: root
+        group: root
+        mode: '0644'
+      tags:
+        - system
+        - logging
+
+    - name: Install monitoring agent
+      apt:
+        name:
+          - prometheus-node-exporter
+        state: present
+      when: enable_monitoring | bool
+      tags:
+        - monitoring
+
+    - name: Configure monitoring agent
+      template:
+        src: ../templates/node_exporter.j2
+        dest: /etc/default/prometheus-node-exporter
+        owner: root
+        group: root
+        mode: '0644'
+      notify:
+        - restart node_exporter
+      when: enable_monitoring | bool
+      tags:
+        - monitoring
+
+    - name: Enable monitoring agent service
+      service:
+        name: prometheus-node-exporter
+        state: started
+        enabled: true
+      when: enable_monitoring | bool
+      tags:
+        - monitoring
+
+  post_tasks:
+    - name: Verify system setup
+      command: "echo 'System setup completed successfully'"
+      changed_when: false
+
+    - name: Check application directory permissions
+      file:
+        path: "{{ app_base_dir }}"
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        mode: '0755'
+        recurse: true
+      tags:
+        - app
+        - permissions
+
+    - name: Log setup completion
+      lineinfile:
+        path: "{{ app_base_dir }}/logs/setup.log"
+        line: "{{ ansible_date_time.iso8601 }} - Infrastructure setup completed successfully"
+        create: true
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        mode: '0644'
+
+    - name: Send setup notification
+      include_tasks: ../tasks/send_notification.yml
+      vars:
+        notification_subject: "Infrastructure setup for {{ environment }} completed"
+        notification_body: "Successfully set up infrastructure for {{ environment }} environment at {{ ansible_date_time.iso8601 }}"
+      when: enable_notifications | default(false)
+
+  handlers:
+    - name: restart node_exporter
+      service:
+        name: prometheus-node-exporter
+        state: restarted
+
+    - name: reload systemd
+      systemd:
+        daemon_reload: true
+
+  vars:
+    app_user: app
+    app_group: app
+    app_base_dir: /opt/document-management
+    app_name: docaichatbot
+    environment: "{{ env | default('development') }}"
+    app_port: 8000
+    setup_app: true
+    setup_database: true
+    enable_monitoring: true
+    enable_notifications: "{{ environment != 'development' }}"
