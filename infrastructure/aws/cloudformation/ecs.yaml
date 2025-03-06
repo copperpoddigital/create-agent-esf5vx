@@ -1,0 +1,730 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  AWS CloudFormation template for the ECS (Elastic Container Service) infrastructure 
+  for the Document Management and AI Chatbot System. This template provisions a secure, 
+  scalable container orchestration environment with Fargate tasks, services, auto-scaling 
+  configurations, and necessary IAM roles and security groups.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Project Information
+        Parameters:
+          - ProjectName
+          - Environment
+      - Label:
+          default: Network Configuration
+        Parameters:
+          - VpcId
+          - PrivateSubnetIds
+          - AlbSecurityGroupId
+      - Label:
+          default: Load Balancer Configuration
+        Parameters:
+          - TargetGroupArn
+          - LoadBalancerResourceLabel
+          - TargetGroupResourceLabel
+      - Label:
+          default: Container Configuration
+        Parameters:
+          - ContainerImage
+          - ContainerPort
+          - TaskCpu
+          - TaskMemory
+      - Label:
+          default: Auto-scaling Configuration
+        Parameters:
+          - DesiredCount
+          - MinCapacity
+          - MaxCapacity
+      - Label:
+          default: Resource References
+        Parameters:
+          - DocumentBucketName
+          - DBEndpoint
+          - DBName
+          - DBSecretArn
+          - OpenAIApiKeySecretArn
+      - Label:
+          default: Monitoring Configuration
+        Parameters:
+          - LogRetentionDays
+          - EnableContainerInsights
+          - SNSAlarmEmail
+    ParameterLabels:
+      ProjectName:
+        default: Project Name
+      Environment:
+        default: Environment
+      VpcId:
+        default: VPC ID
+      PrivateSubnetIds:
+        default: Private Subnet IDs
+      AlbSecurityGroupId:
+        default: ALB Security Group ID
+      TargetGroupArn:
+        default: Target Group ARN
+      LoadBalancerResourceLabel:
+        default: Load Balancer Resource Label
+      TargetGroupResourceLabel:
+        default: Target Group Resource Label
+      ContainerImage:
+        default: Container Image
+      ContainerPort:
+        default: Container Port
+      TaskCpu:
+        default: Task CPU
+      TaskMemory:
+        default: Task Memory
+      DesiredCount:
+        default: Desired Task Count
+      MinCapacity:
+        default: Minimum Capacity
+      MaxCapacity:
+        default: Maximum Capacity
+      DocumentBucketName:
+        default: Document Bucket Name
+      DBEndpoint:
+        default: Database Endpoint
+      DBName:
+        default: Database Name
+      DBSecretArn:
+        default: Database Secret ARN
+      OpenAIApiKeySecretArn:
+        default: OpenAI API Key Secret ARN
+      LogRetentionDays:
+        default: Log Retention Days
+      EnableContainerInsights:
+        default: Enable Container Insights
+      SNSAlarmEmail:
+        default: Alarm Notification Email
+
+Parameters:
+  ProjectName:
+    Type: String
+    Description: Name of the project, used for resource naming and tagging
+    Default: docmgmt-chatbot
+  
+  Environment:
+    Type: String
+    Description: Deployment environment (dev, staging, prod)
+    Default: dev
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+  
+  VpcId:
+    Type: String
+    Description: ID of the VPC where the ECS resources will be deployed
+  
+  PrivateSubnetIds:
+    Type: List<String>
+    Description: List of private subnet IDs for ECS task deployment
+  
+  AlbSecurityGroupId:
+    Type: String
+    Description: ID of the ALB security group
+  
+  TargetGroupArn:
+    Type: String
+    Description: ARN of the ALB target group
+  
+  LoadBalancerResourceLabel:
+    Type: String
+    Description: Resource label for the load balancer (used in auto-scaling)
+  
+  TargetGroupResourceLabel:
+    Type: String
+    Description: Resource label for the target group (used in auto-scaling)
+  
+  ContainerImage:
+    Type: String
+    Description: Docker image for the container (e.g., account.dkr.ecr.region.amazonaws.com/repo:tag)
+  
+  ContainerPort:
+    Type: Number
+    Description: Port on which the container is listening
+    Default: 8000
+  
+  TaskCpu:
+    Type: String
+    Description: CPU units for the task (256, 512, 1024, 2048, 4096)
+    Default: '1024'
+    AllowedValues:
+      - '256'
+      - '512'
+      - '1024'
+      - '2048'
+      - '4096'
+  
+  TaskMemory:
+    Type: String
+    Description: Memory (MiB) for the task (512, 1024, 2048, 4096, 8192, 16384)
+    Default: '2048'
+    AllowedValues:
+      - '512'
+      - '1024'
+      - '2048'
+      - '4096'
+      - '8192'
+      - '16384'
+  
+  DesiredCount:
+    Type: Number
+    Description: Desired number of tasks to run
+    Default: 2
+    MinValue: 1
+    MaxValue: 10
+  
+  MinCapacity:
+    Type: Number
+    Description: Minimum number of tasks for auto-scaling
+    Default: 2
+    MinValue: 1
+    MaxValue: 10
+  
+  MaxCapacity:
+    Type: Number
+    Description: Maximum number of tasks for auto-scaling
+    Default: 10
+    MinValue: 1
+    MaxValue: 20
+  
+  DocumentBucketName:
+    Type: String
+    Description: Name of the S3 bucket for document storage
+  
+  DBEndpoint:
+    Type: String
+    Description: Endpoint of the RDS database
+  
+  DBName:
+    Type: String
+    Description: Name of the database
+  
+  DBSecretArn:
+    Type: String
+    Description: ARN of the Secrets Manager secret containing database credentials
+  
+  OpenAIApiKeySecretArn:
+    Type: String
+    Description: ARN of the Secrets Manager secret containing the OpenAI API key
+  
+  LogRetentionDays:
+    Type: Number
+    Description: Number of days to retain CloudWatch logs
+    Default: 30
+    MinValue: 1
+    MaxValue: 365
+  
+  EnableContainerInsights:
+    Type: String
+    Description: Whether to enable Container Insights for the ECS cluster
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+  
+  SNSAlarmEmail:
+    Type: String
+    Description: Email address to receive ECS alarm notifications
+    Default: ''
+
+Conditions:
+  IsProd: !Equals [!Ref Environment, 'prod']
+  IsStaging: !Equals [!Ref Environment, 'staging']
+  EnableContainerInsights: !Equals [!Ref EnableContainerInsights, 'true']
+  HasAlarmEmail: !Not [!Equals [!Ref SNSAlarmEmail, '']]
+
+Resources:
+  # ECS Cluster
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub '${ProjectName}-${Environment}-cluster'
+      ClusterSettings:
+        - Name: containerInsights
+          Value: !If [EnableContainerInsights, 'enabled', 'disabled']
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-cluster'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # CloudWatch Log Group for container logs
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/ecs/${ProjectName}-${Environment}'
+      RetentionInDays: !Ref LogRetentionDays
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-logs'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # IAM Roles for ECS
+  ECSTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-${Environment}-task-execution-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy'
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-task-execution-role'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+
+  ECSTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-${Environment}-task-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-task-role'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # IAM Policies
+  ECSTaskRolePolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub '${ProjectName}-${Environment}-task-policy'
+      Roles:
+        - !Ref ECSTaskRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - 's3:GetObject'
+              - 's3:PutObject'
+              - 's3:ListBucket'
+              - 's3:DeleteObject'
+            Resource:
+              - !Sub 'arn:aws:s3:::${DocumentBucketName}'
+              - !Sub 'arn:aws:s3:::${DocumentBucketName}/*'
+
+  ECSTaskExecutionRolePolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub '${ProjectName}-${Environment}-task-execution-policy'
+      Roles:
+        - !Ref ECSTaskExecutionRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - 'secretsmanager:GetSecretValue'
+            Resource:
+              - !Ref DBSecretArn
+              - !Ref OpenAIApiKeySecretArn
+
+  # Security Group for ECS Tasks
+  ECSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub 'Security group for ${ProjectName} ${Environment} ECS tasks'
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - Description: 'Allow HTTP from ALB'
+          IpProtocol: tcp
+          FromPort: !Ref ContainerPort
+          ToPort: !Ref ContainerPort
+          SourceSecurityGroupId: !Ref AlbSecurityGroupId
+      SecurityGroupEgress:
+        - Description: 'Allow all outbound traffic'
+          IpProtocol: '-1'
+          CidrIp: '0.0.0.0/0'
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-ecs-sg'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # ECS Task Definition
+  ECSTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub '${ProjectName}-${Environment}'
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: !Ref TaskCpu
+      Memory: !Ref TaskMemory
+      ExecutionRoleArn: !GetAtt ECSTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt ECSTaskRole.Arn
+      ContainerDefinitions:
+        - Name: app
+          Image: !Ref ContainerImage
+          Essential: true
+          PortMappings:
+            - ContainerPort: !Ref ContainerPort
+              HostPort: !Ref ContainerPort
+              Protocol: tcp
+          Environment:
+            - Name: ENVIRONMENT
+              Value: !Ref Environment
+            - Name: DB_HOST
+              Value: 
+                Fn::ImportValue: !Ref DBEndpoint
+            - Name: DB_NAME
+              Value: 
+                Fn::ImportValue: !Ref DBName
+            - Name: DOCUMENT_BUCKET
+              Value: 
+                Fn::ImportValue: !Ref DocumentBucketName
+          Secrets:
+            - Name: DB_PASSWORD
+              ValueFrom: !Ref DBSecretArn
+            - Name: OPENAI_API_KEY
+              ValueFrom: !Ref OpenAIApiKeySecretArn
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref 'AWS::Region'
+              awslogs-stream-prefix: ecs
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - !Sub 'curl -f http://localhost:${ContainerPort}/health/live || exit 1'
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 60
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-task'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # ECS Service
+  ECSService:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: !Sub '${ProjectName}-${Environment}-service'
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref ECSTaskDefinition
+      DesiredCount: !Ref DesiredCount
+      LaunchType: FARGATE
+      PlatformVersion: LATEST
+      SchedulingStrategy: REPLICA
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 100
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
+      HealthCheckGracePeriodSeconds: 60
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets: !Ref PrivateSubnetIds
+          SecurityGroups:
+            - !Ref ECSSecurityGroup
+          AssignPublicIp: DISABLED
+      LoadBalancers:
+        - TargetGroupArn: !Ref TargetGroupArn
+          ContainerName: app
+          ContainerPort: !Ref ContainerPort
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-service'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+    DependsOn:
+      - ECSTaskDefinition
+      - ECSCluster
+
+  # Auto Scaling
+  ECSScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      MaxCapacity: !Ref MaxCapacity
+      MinCapacity: !Ref MinCapacity
+      ResourceId: !Sub 'service/${ECSCluster}/${ECSService.Name}'
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+      RoleARN: !Sub 'arn:aws:iam::${AWS::AccountId}:role/aws-service-role/ecs.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_ECSService'
+
+  # CPU Scaling Policy
+  CPUScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub '${ProjectName}-${Environment}-cpu-scaling'
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref ECSScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        TargetValue: 70.0
+        ScaleInCooldown: 300
+        ScaleOutCooldown: 180
+
+  # Memory Scaling Policy
+  MemoryScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub '${ProjectName}-${Environment}-memory-scaling'
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref ECSScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageMemoryUtilization
+        TargetValue: 75.0
+        ScaleInCooldown: 300
+        ScaleOutCooldown: 180
+
+  # Request Count Scaling Policy
+  RequestCountScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub '${ProjectName}-${Environment}-request-scaling'
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref ECSScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ALBRequestCountPerTarget
+          ResourceLabel: !Sub '${LoadBalancerResourceLabel}/${TargetGroupResourceLabel}'
+        TargetValue: 100.0
+        ScaleInCooldown: 300
+        ScaleOutCooldown: 180
+
+  # CloudWatch Alarms
+  ServiceHealthAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-${Environment}-service-health'
+      AlarmDescription: !Sub 'Alarm when healthy task count drops below threshold for ${ProjectName} ${Environment} service'
+      MetricName: HealthyTaskCount
+      Namespace: AWS/ECS
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 3
+      Threshold: !Ref MinCapacity
+      ComparisonOperator: LessThanThreshold
+      Dimensions:
+        - Name: ClusterName
+          Value: !Ref ECSCluster
+        - Name: ServiceName
+          Value: !GetAtt ECSService.Name
+      AlarmActions:
+        - !Ref SNSAlarmTopic
+      OKActions:
+        - !Ref SNSAlarmTopic
+
+  CPUUtilizationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-${Environment}-cpu-utilization'
+      AlarmDescription: !Sub 'Alarm when CPU utilization exceeds 85% for ${ProjectName} ${Environment} service'
+      MetricName: CPUUtilization
+      Namespace: AWS/ECS
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 3
+      Threshold: 85
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: ClusterName
+          Value: !Ref ECSCluster
+        - Name: ServiceName
+          Value: !GetAtt ECSService.Name
+      AlarmActions:
+        - !Ref SNSAlarmTopic
+      OKActions:
+        - !Ref SNSAlarmTopic
+
+  MemoryUtilizationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-${Environment}-memory-utilization'
+      AlarmDescription: !Sub 'Alarm when memory utilization exceeds 85% for ${ProjectName} ${Environment} service'
+      MetricName: MemoryUtilization
+      Namespace: AWS/ECS
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 3
+      Threshold: 85
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: ClusterName
+          Value: !Ref ECSCluster
+        - Name: ServiceName
+          Value: !GetAtt ECSService.Name
+      AlarmActions:
+        - !Ref SNSAlarmTopic
+      OKActions:
+        - !Ref SNSAlarmTopic
+
+  # SNS Topic for alarms
+  SNSAlarmTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${ProjectName}-${Environment}-ecs-alarms'
+      DisplayName: !Sub '${ProjectName} ${Environment} ECS Alarms'
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-ecs-alarms'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # SNS Subscription for alarms
+  SNSAlarmSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasAlarmEmail
+    Properties:
+      Protocol: email
+      TopicArn: !Ref SNSAlarmTopic
+      Endpoint: !Ref SNSAlarmEmail
+
+  # CloudWatch Dashboard
+  Dashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub '${ProjectName}-${Environment}-ecs-dashboard'
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/ECS", "CPUUtilization", "ServiceName", "${ECSService.Name}", "ClusterName", "${ECSCluster}" ]
+                ],
+                "period": 60,
+                "stat": "Average",
+                "region": "${AWS::Region}",
+                "title": "CPU Utilization"
+              }
+            },
+            {
+              "type": "metric",
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/ECS", "MemoryUtilization", "ServiceName", "${ECSService.Name}", "ClusterName", "${ECSCluster}" ]
+                ],
+                "period": 60,
+                "stat": "Average",
+                "region": "${AWS::Region}",
+                "title": "Memory Utilization"
+              }
+            },
+            {
+              "type": "metric",
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/ECS", "RunningTaskCount", "ServiceName", "${ECSService.Name}", "ClusterName", "${ECSCluster}" ],
+                  [ "AWS/ECS", "PendingTaskCount", "ServiceName", "${ECSService.Name}", "ClusterName", "${ECSCluster}" ]
+                ],
+                "period": 60,
+                "stat": "Average",
+                "region": "${AWS::Region}",
+                "title": "Task Count"
+              }
+            },
+            {
+              "type": "metric",
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/ApplicationELB", "RequestCount", "TargetGroup", "${TargetGroupResourceLabel}" ]
+                ],
+                "period": 60,
+                "stat": "Sum",
+                "region": "${AWS::Region}",
+                "title": "Request Count"
+              }
+            }
+          ]
+        }
+
+Outputs:
+  ClusterName:
+    Description: Name of the ECS cluster
+    Value: !Ref ECSCluster
+    Export:
+      Name: !Sub '${AWS::StackName}-ClusterName'
+  
+  ClusterArn:
+    Description: ARN of the ECS cluster
+    Value: !GetAtt ECSCluster.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-ClusterArn'
+  
+  ServiceName:
+    Description: Name of the ECS service
+    Value: !GetAtt ECSService.Name
+    Export:
+      Name: !Sub '${AWS::StackName}-ServiceName'
+  
+  ServiceArn:
+    Description: ARN of the ECS service
+    Value: !Ref ECSService
+    Export:
+      Name: !Sub '${AWS::StackName}-ServiceArn'
+  
+  TaskDefinitionArn:
+    Description: ARN of the ECS task definition
+    Value: !Ref ECSTaskDefinition
+    Export:
+      Name: !Sub '${AWS::StackName}-TaskDefinitionArn'
+  
+  EcsSecurityGroupId:
+    Description: ID of the ECS security group
+    Value: !Ref ECSSecurityGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-EcsSecurityGroupId'
+  
+  TaskExecutionRoleArn:
+    Description: ARN of the ECS task execution role
+    Value: !GetAtt ECSTaskExecutionRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-TaskExecutionRoleArn'
+  
+  TaskRoleArn:
+    Description: ARN of the ECS task role
+    Value: !GetAtt ECSTaskRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-TaskRoleArn'
