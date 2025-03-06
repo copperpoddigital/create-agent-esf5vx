@@ -1,0 +1,77 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Base resources
+resources:
+- ../../base
+
+# Namespace and name prefix
+namespace: document-management-staging
+namePrefix: staging-
+
+# Common labels
+commonLabels:
+  environment: staging
+  app: document-management
+  managed-by: kustomize
+
+# Image references
+images:
+- name: $(IMAGE_REPOSITORY)/document-management-app
+  newName: document-management-registry.staging/document-management-app
+  newTag: $(IMAGE_TAG)
+
+# Replica count
+replicas:
+- name: document-management-app
+  count: 2
+
+# ConfigMap generation
+configMapGenerator:
+- name: app-config
+  behavior: merge
+  literals:
+  - ENV=staging
+  - DEBUG=false
+  - LOG_LEVEL=INFO
+  - POSTGRES_SERVER=postgres-staging-service
+  - POSTGRES_DB=document_management_staging
+  - POOL_SIZE=10
+  - MAX_OVERFLOW=20
+  - VECTOR_DIMENSION=768
+  - INDEX_TYPE=IVFFlat
+  - NLIST=100
+  - DEFAULT_TOP_K=5
+  - USE_GPU=false
+  - LLM_MODEL=gpt-3.5-turbo
+  - TEMPERATURE=0.7
+  - MAX_TOKENS=1024
+  - REQUEST_TIMEOUT=30
+  - USE_CACHE=true
+  - CACHE_TTL_SECONDS=3600
+  - MAX_DOCUMENT_SIZE_MB=10
+  - ENABLE_METRICS=true
+  - ALLOWED_HOSTS=api.staging.document-management.com
+
+# Secret generation
+secretGenerator:
+- name: app-secrets
+  behavior: merge
+  envs:
+  - staging-secrets.env
+
+# Patches
+patchesStrategicMerge:
+- patches/deployment-patch.yaml
+- patches/ingress-patch.yaml
+- patches/service-patch.yaml
+
+# Variables
+vars:
+- name: INGRESS_HOST
+  objref:
+    kind: ConfigMap
+    name: app-config
+    apiVersion: v1
+  fieldref:
+    fieldpath: data.ALLOWED_HOSTS
