@@ -1,0 +1,87 @@
+[tool.poetry]
+name = "document-management-ai-chatbot"
+version = "1.0.0"
+description = "Document Management and AI Chatbot System with vector search capabilities"
+authors = ["Development Team <dev@example.com>"]
+readme = "README.md"
+license = "MIT"
+repository = "https://github.com/example/document-management-ai-chatbot"
+packages = [{include = "app"}]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Topic :: Text Processing :: Linguistic"
+]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+fastapi = "^0.95.0"  # API framework for building the backend API endpoints
+uvicorn = "^0.21.1"  # ASGI server for running the FastAPI application
+pydantic = "^2.0.3"  # Data validation and settings management using Python type hints
+sqlalchemy = "^2.0.15"  # ORM for database operations and management
+alembic = "^1.11.1"  # Database migration tool for SQLAlchemy
+psycopg2-binary = "^2.9.6"  # PostgreSQL adapter for Python
+pymupdf = "^1.22.3"  # PDF processing and text extraction
+sentence-transformers = "^2.2.2"  # Generate text embeddings for vector search
+faiss-cpu = "^1.7.4"  # Vector similarity search and storage
+python-jose = "^3.3.0"  # JWT token handling for authentication
+passlib = "^1.7.4"  # Password hashing and verification
+python-multipart = "^0.0.6"  # Handling multipart/form-data for file uploads
+openai = "^0.27.8"  # OpenAI API client for LLM integration
+python-dotenv = "^1.0.0"  # Loading environment variables from .env files
+numpy = "^1.24.3"  # Numerical operations for vector processing
+ray = "^2.5.1"  # Reinforcement learning framework
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^7.3.1"  # Testing framework
+pytest-cov = "^4.1.0"  # Test coverage reporting
+pytest-asyncio = "^0.21.0"  # Testing async code
+pytest-mock = "^3.10.0"  # Mocking for tests
+black = "^23.3.0"  # Code formatting
+flake8 = "^6.0.0"  # Code linting
+isort = "^5.12.0"  # Import sorting
+mypy = "^1.3.0"  # Static type checking
+bandit = "^1.7.5"  # Security oriented static analyzer
+httpx = "^0.24.1"  # HTTP client for testing API endpoints
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[scripts]
+start = "uvicorn main:app --host 0.0.0.0 --port 8000"
+dev = "uvicorn main:app --host 0.0.0.0 --port 8000 --reload"
+test = "pytest"
+test-cov = "pytest --cov=app --cov-report=term-missing"
+lint = "flake8 app tests"
+format = "black app tests"
+check-format = "black --check app tests"
+sort-imports = "isort app tests"
+type-check = "mypy app"
+security-check = "bandit -r app"
+
+[tool.black]
+line-length = 88
+target-version = ['py310']
+include = '\.pyi?$'
+
+[tool.isort]
+profile = "black"
+line_length = 88
+multi_line_output = 3
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_functions = "test_*"
+python_classes = "Test*"
+addopts = "--cov=app --cov-report=term-missing"
