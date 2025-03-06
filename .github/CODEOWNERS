@@ -1,0 +1,41 @@
+# Each line is a file pattern followed by one or more owners
+# Order is important; the last matching pattern takes precedence
+
+# Default owners for everything in the repo
+* @project-admins
+
+# Backend application code
+src/backend/app/core/ @backend-core-team
+src/backend/app/api/ @api-team
+src/backend/app/models/ @data-team
+src/backend/app/schemas/ @data-team
+src/backend/app/crud/ @data-team
+src/backend/app/db/ @data-team
+src/backend/app/vector_store/ @vector-search-team
+src/backend/app/services/ @services-team
+src/backend/app/utils/ @backend-core-team
+
+# Infrastructure code
+infrastructure/ @devops-team
+infrastructure/terraform/ @terraform-experts
+infrastructure/ansible/ @ansible-experts
+infrastructure/monitoring/ @monitoring-team
+infrastructure/docker/ @container-experts
+infrastructure/k8s/ @kubernetes-experts
+
+# CI/CD workflows
+.github/workflows/ @ci-cd-team
+
+# Documentation
+docs/ @documentation-team
+
+# Scripts
+scripts/ @devops-team
+src/backend/scripts/ @backend-core-team
+
+# Tests
+src/backend/tests/ @qa-team
+
+# Security-related files
+src/backend/app/core/security.py @security-team @backend-core-team
+SECURITY.md @security-team
