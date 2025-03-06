@@ -1,0 +1,191 @@
+# Tempo Configuration
+# Distributed tracing system for the Document Management and AI Chatbot System
+# Version: 1.5.0
+
+# Server configuration
+server:
+  http_listen_port: 3200    # Port for HTTP API
+  grpc_listen_port: 9096    # Port for gRPC API
+
+# Distributor configuration - handles ingestion of traces from multiple sources
+distributor:
+  receivers:
+    # Jaeger receiver for compatibility with Jaeger clients
+    jaeger:
+      protocols:
+        thrift_http:
+          endpoint: 0.0.0.0:14268
+        grpc:
+          endpoint: 0.0.0.0:14250
+        thrift_binary:
+          endpoint: 0.0.0.0:6832
+        thrift_compact:
+          endpoint: 0.0.0.0:6831
+    
+    # Zipkin receiver for compatibility with Zipkin clients
+    zipkin:
+      endpoint: 0.0.0.0:9411
+    
+    # OpenTelemetry Protocol (OTLP) receiver
+    otlp:
+      protocols:
+        http:
+          endpoint: 0.0.0.0:4318
+        grpc:
+          endpoint: 0.0.0.0:4317
+    
+    # OpenCensus receiver
+    opencensus:
+      endpoint: 0.0.0.0:55678
+
+# Ingester configuration - handles batching of traces
+ingester:
+  max_block_duration: 5m     # Maximum duration of a block before flushing
+  trace_idle_period: 10s     # How long to wait for spans before considering a trace complete
+  flush_check_period: 30s    # How often to check for traces to flush
+
+# Compactor configuration - handles compaction and retention of trace blocks
+compactor:
+  compaction:
+    block_retention: 336h      # 14 days retention for standard traces
+    compacted_block_retention: 48h  # How long to keep compacted blocks
+
+# Storage configuration
+storage:
+  trace:
+    backend: local             # Using local file system for trace storage
+    block:
+      bloom_filter_false_positive: 0.05  # Controls bloom filter accuracy
+      index_downsample_bytes: 1000       # Controls index granularity
+      encoding: zstd                     # Compression algorithm
+    wal:
+      path: /tmp/tempo/wal     # Write-ahead log path
+      encoding: snappy         # WAL compression
+    local:
+      path: /tmp/tempo/blocks  # Local filesystem storage path
+    pool:
+      max_workers: 100         # Maximum number of worker threads
+      queue_depth: 10000       # Maximum queued items
+
+# Overrides for specific behaviors
+overrides:
+  metrics_generator_processors: [service-graphs, span-metrics]  # Enable service graph and span metrics generation
+  max_bytes_per_trace: 5242880        # Maximum size of a trace (5MB)
+  max_search_bytes_per_trace: 1048576 # Maximum size when searching (1MB)
+
+# Metrics generator configuration - generates metrics from traces
+metrics_generator:
+  registry:
+    external_labels:
+      source: tempo
+      environment: ${ENV:development}  # Environment label with default value
+  storage:
+    path: /tmp/tempo/generator/wal     # Path for metrics storage
+    remote_write:
+      enabled: true
+      endpoint: http://prometheus:9090/api/v1/write  # Send metrics to Prometheus
+  processors:
+    # Service graph processor configuration
+    - service-graphs:
+        histogram_buckets: [0.1, 0.2, 0.4, 0.8, 1.6, 3.2, 6.4, 12.8]  # Duration buckets in seconds
+    
+    # Span metrics processor configuration
+    - span-metrics:
+        dimensions: [service, span_name, status_code]  # Dimensions to include in metrics
+        histogram_buckets: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10]  # Duration buckets in seconds
+
+# Search configuration
+search:
+  enabled: true        # Enable trace search capability
+  max_duration: 336h   # Maximum time range for searches (14 days)
+
+# Trace sources configuration - documents where traces come from
+trace_sources:
+  - component: API Service
+    instrumentation: OpenTelemetry
+    sampling_rate: 0.1  # Sample 10% of requests
+    attributes:
+      - service
+      - endpoint
+      - http.method
+      - http.status_code
+  
+  - component: Document Processor
+    instrumentation: OpenTelemetry
+    sampling_rate: 0.05  # Sample 5% of operations
+    attributes:
+      - service
+      - document_id
+      - processor_type
+  
+  - component: Vector Search
+    instrumentation: OpenTelemetry
+    sampling_rate: 0.1  # Sample 10% of searches
+    attributes:
+      - service
+      - query_id
+      - vector_index
+  
+  - component: Database Operations
+    instrumentation: SQLAlchemy
+    sampling_rate: 0.05  # Sample 5% of database operations
+    attributes:
+      - service
+      - operation
+      - table
+  
+  - component: LLM API Calls
+    instrumentation: Custom
+    sampling_rate: 1.0  # Sample 100% of LLM API calls (critical path)
+    attributes:
+      - service
+      - model
+      - token_count
+
+# Integration points with other observability tools
+integration_points:
+  - component: Grafana
+    integration_type: Data Source
+    url: http://tempo:3200
+  
+  - component: Prometheus
+    integration_type: Metrics Exposure
+    url: http://prometheus:9090
+  
+  - component: Loki
+    integration_type: Log Correlation
+    url: http://loki:3100
+
+# Retention policies for different types of traces
+retention_policies:
+  - trace_type: Standard Traces
+    retention_period: 14d
+  
+  - trace_type: Error Traces
+    retention_period: 30d
+
+# Metrics generated by Tempo
+metrics_generated:
+  - name: tempo_spans_received_total
+    type: counter
+    description: Total number of spans received by Tempo
+  
+  - name: tempo_traces_created_total
+    type: counter
+    description: Total number of traces created
+  
+  - name: tempo_request_duration_seconds
+    type: histogram
+    description: Duration of requests in seconds
+  
+  - name: service_graph_request_total
+    type: counter
+    description: Total number of requests between services
+  
+  - name: service_graph_request_duration_seconds
+    type: histogram
+    description: Duration of requests between services
+  
+  - name: span_duration_seconds
+    type: histogram
+    description: Duration of spans by service and name
