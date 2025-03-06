@@ -1,0 +1,389 @@
+---
+# Ansible playbook for comprehensive system backups
+# This playbook performs backups of the database, vector indices, document storage, and configuration files
+# It includes options for local storage and optional cloud storage (S3)
+# 
+# Requirements:
+# - Ansible 2.9+
+# - Access to target hosts with sufficient privileges
+# - PostgreSQL database credentials
+# - Sufficient disk space for backups
+# - AWS credentials (if using cloud storage)
+#
+# External dependencies:
+# - community.postgresql collection (latest)
+# - amazon.aws collection (latest)
+#
+# Usage:
+# ansible-playbook -i inventory backup.yml -e "environment=production"
+# 
+# Optional parameters:
+# - environment: deployment environment (development, staging, production)
+# - target_hosts: host group to target (default: db_servers)
+# - backup_retention_days: how many days of backups to keep (default: 30)
+
+- name: Backup Document Management and AI Chatbot System
+  hosts: "{{ target_hosts | default('db_servers') }}"
+  become: true
+  vars_files:
+    - ../vars/main.yml
+    - ../vars/{{ environment }}.yml
+  
+  pre_tasks:
+    - name: Create backup timestamp
+      set_fact:
+        backup_timestamp: "{{ ansible_date_time.iso8601_basic_short }}"
+    
+    - name: Ensure backup directories exist
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ backup_user | default('root') }}"
+        group: "{{ backup_group | default('root') }}"
+        mode: '0750'
+      loop:
+        - "{{ backup_base_dir }}/database"
+        - "{{ backup_base_dir }}/vector_indices"
+        - "{{ backup_base_dir }}/documents"
+        - "{{ backup_base_dir }}/config"
+        - "{{ backup_base_dir }}/logs"
+    
+    - name: Check available disk space
+      shell: "df -h {{ backup_base_dir }} | awk 'NR==2 {print $5}' | sed 's/%//g'"
+      register: disk_space_check
+      changed_when: false
+    
+    - name: Fail if disk space is low
+      fail:
+        msg: "Insufficient disk space for backup. {{ disk_space_check.stdout }}% used, threshold is {{ backup_disk_threshold | default('80') }}%"
+      when: disk_space_check.stdout|int > backup_disk_threshold|int
+  
+  tasks:
+    # Database backup tasks
+    - name: Database Backup Tasks
+      block:
+        - name: Create database backup directory for this run
+          file:
+            path: "{{ backup_base_dir }}/database/{{ backup_timestamp }}"
+            state: directory
+            owner: "{{ db_user }}"
+            group: "{{ db_group }}"
+            mode: '0750'
+        
+        - name: Perform full database backup
+          community.postgresql.postgresql_db:
+            name: "{{ db_name }}"
+            state: dump
+            target: "{{ backup_base_dir }}/database/{{ backup_timestamp }}/{{ db_name }}_full.sql"
+            login_host: "{{ db_host }}"
+            login_user: "{{ db_user }}"
+            login_password: "{{ db_password }}"
+            port: "{{ db_port | default('5432') }}"
+          when: backup_database | bool
+        
+        - name: Archive WAL logs
+          shell: "pg_basebackup -D {{ backup_base_dir }}/database/{{ backup_timestamp }}/wal -X stream -c fast -P -v"
+          become: true
+          become_user: postgres
+          when: backup_wal | bool
+        
+        - name: Compress database backup
+          archive:
+            path: "{{ backup_base_dir }}/database/{{ backup_timestamp }}"
+            dest: "{{ backup_base_dir }}/database/{{ db_name }}_{{ backup_timestamp }}.tar.gz"
+            format: gz
+          when: compress_backups | bool
+        
+        - name: Remove uncompressed backup directory
+          file:
+            path: "{{ backup_base_dir }}/database/{{ backup_timestamp }}"
+            state: absent
+          when: compress_backups | bool
+      when: backup_database | bool
+      tags:
+        - backup
+        - database
+    
+    # Vector index backup tasks
+    - name: Vector Index Backup Tasks
+      block:
+        - name: Create vector index backup directory for this run
+          file:
+            path: "{{ backup_base_dir }}/vector_indices/{{ backup_timestamp }}"
+            state: directory
+            owner: "{{ app_user }}"
+            group: "{{ app_group }}"
+            mode: '0750'
+        
+        - name: Backup FAISS vector indices
+          copy:
+            src: "{{ app_base_dir }}/data/vector_indices/"
+            dest: "{{ backup_base_dir }}/vector_indices/{{ backup_timestamp }}/"
+            remote_src: true
+        
+        - name: Compress vector index backup
+          archive:
+            path: "{{ backup_base_dir }}/vector_indices/{{ backup_timestamp }}"
+            dest: "{{ backup_base_dir }}/vector_indices/vector_indices_{{ backup_timestamp }}.tar.gz"
+            format: gz
+          when: compress_backups | bool
+        
+        - name: Remove uncompressed vector index backup directory
+          file:
+            path: "{{ backup_base_dir }}/vector_indices/{{ backup_timestamp }}"
+            state: absent
+          when: compress_backups | bool
+      when: backup_vector_indices | bool
+      tags:
+        - backup
+        - vector
+    
+    # Document storage backup tasks
+    - name: Document Storage Backup Tasks
+      block:
+        - name: Create document backup directory for this run
+          file:
+            path: "{{ backup_base_dir }}/documents/{{ backup_timestamp }}"
+            state: directory
+            owner: "{{ app_user }}"
+            group: "{{ app_group }}"
+            mode: '0750'
+        
+        - name: Backup document files
+          copy:
+            src: "{{ app_base_dir }}/data/documents/"
+            dest: "{{ backup_base_dir }}/documents/{{ backup_timestamp }}/"
+            remote_src: true
+        
+        - name: Compress document backup
+          archive:
+            path: "{{ backup_base_dir }}/documents/{{ backup_timestamp }}"
+            dest: "{{ backup_base_dir }}/documents/documents_{{ backup_timestamp }}.tar.gz"
+            format: gz
+          when: compress_backups | bool
+        
+        - name: Remove uncompressed document backup directory
+          file:
+            path: "{{ backup_base_dir }}/documents/{{ backup_timestamp }}"
+            state: absent
+          when: compress_backups | bool
+      when: backup_documents | bool
+      tags:
+        - backup
+        - documents
+    
+    # Configuration backup tasks
+    - name: Configuration Backup Tasks
+      block:
+        - name: Backup application configuration
+          copy:
+            src: "{{ app_base_dir }}/config/"
+            dest: "{{ backup_base_dir }}/config/config_{{ backup_timestamp }}/"
+            remote_src: true
+        
+        - name: Backup database configuration
+          copy:
+            src: "/etc/postgresql/14/main/"
+            dest: "{{ backup_base_dir }}/config/postgresql_{{ backup_timestamp }}/"
+            remote_src: true
+          when: backup_database | bool
+        
+        - name: Compress configuration backup
+          archive:
+            path: "{{ backup_base_dir }}/config/"
+            dest: "{{ backup_base_dir }}/config_{{ backup_timestamp }}.tar.gz"
+            format: gz
+            exclude_path:
+              - "{{ backup_base_dir }}/config/*.tar.gz"
+          when: compress_backups | bool
+      when: backup_config | bool
+      tags:
+        - backup
+        - config
+    
+    # Cloud storage tasks (if enabled)
+    - name: Cloud Storage Tasks
+      block:
+        - name: Upload database backup to S3
+          amazon.aws.s3_sync:
+            bucket: "{{ s3_bucket_name }}"
+            file_root: "{{ backup_base_dir }}/database/"
+            key_prefix: "database/"
+            permission: private
+          when: backup_database | bool
+        
+        - name: Upload vector index backup to S3
+          amazon.aws.s3_sync:
+            bucket: "{{ s3_bucket_name }}"
+            file_root: "{{ backup_base_dir }}/vector_indices/"
+            key_prefix: "vector_indices/"
+            permission: private
+          when: backup_vector_indices | bool
+        
+        - name: Upload document backup to S3
+          amazon.aws.s3_sync:
+            bucket: "{{ s3_bucket_name }}"
+            file_root: "{{ backup_base_dir }}/documents/"
+            key_prefix: "documents/"
+            permission: private
+          when: backup_documents | bool
+        
+        - name: Upload configuration backup to S3
+          amazon.aws.s3_sync:
+            bucket: "{{ s3_bucket_name }}"
+            file_root: "{{ backup_base_dir }}/config/"
+            key_prefix: "config/"
+            permission: private
+          when: backup_config | bool
+      when: use_cloud_storage | bool
+      tags:
+        - backup
+        - cloud
+    
+    # Cleanup old backups to manage disk space
+    - name: Cleanup Old Backups
+      block:
+        - name: Find old database backups
+          find:
+            paths: "{{ backup_base_dir }}/database"
+            patterns: "*.tar.gz"
+            age: "{{ backup_retention_days | default(30) }}d"
+            recurse: false
+          register: old_db_backups
+          when: backup_database | bool and cleanup_old_backups | bool
+        
+        - name: Remove old database backups
+          file:
+            path: "{{ item.path }}"
+            state: absent
+          with_items: "{{ old_db_backups.files | default([]) }}"
+          when: backup_database | bool and cleanup_old_backups | bool
+        
+        - name: Find old vector index backups
+          find:
+            paths: "{{ backup_base_dir }}/vector_indices"
+            patterns: "*.tar.gz"
+            age: "{{ backup_retention_days | default(30) }}d"
+            recurse: false
+          register: old_vector_backups
+          when: backup_vector_indices | bool and cleanup_old_backups | bool
+        
+        - name: Remove old vector index backups
+          file:
+            path: "{{ item.path }}"
+            state: absent
+          with_items: "{{ old_vector_backups.files | default([]) }}"
+          when: backup_vector_indices | bool and cleanup_old_backups | bool
+        
+        - name: Find old document backups
+          find:
+            paths: "{{ backup_base_dir }}/documents"
+            patterns: "*.tar.gz"
+            age: "{{ backup_retention_days | default(30) }}d"
+            recurse: false
+          register: old_document_backups
+          when: backup_documents | bool and cleanup_old_backups | bool
+        
+        - name: Remove old document backups
+          file:
+            path: "{{ item.path }}"
+            state: absent
+          with_items: "{{ old_document_backups.files | default([]) }}"
+          when: backup_documents | bool and cleanup_old_backups | bool
+        
+        - name: Find old configuration backups
+          find:
+            paths: "{{ backup_base_dir }}/config"
+            patterns: "*.tar.gz"
+            age: "{{ backup_retention_days | default(30) }}d"
+            recurse: false
+          register: old_config_backups
+          when: backup_config | bool and cleanup_old_backups | bool
+        
+        - name: Remove old configuration backups
+          file:
+            path: "{{ item.path }}"
+            state: absent
+          with_items: "{{ old_config_backups.files | default([]) }}"
+          when: backup_config | bool and cleanup_old_backups | bool
+      when: cleanup_old_backups | bool
+      tags:
+        - backup
+        - cleanup
+  
+  post_tasks:
+    # Verify backup integrity (optional)
+    - name: Verify database backup
+      shell: "pg_restore --list {{ backup_base_dir }}/database/{{ db_name }}_{{ backup_timestamp }}.tar.gz > /dev/null"
+      register: db_verify
+      failed_when: db_verify.rc != 0
+      when: backup_database | bool and verify_backups | bool
+      ignore_errors: true
+    
+    # Log successful backup
+    - name: Log backup completion
+      lineinfile:
+        path: "{{ backup_base_dir }}/logs/backup.log"
+        line: "{{ ansible_date_time.iso8601 }} - Backup completed successfully: timestamp={{ backup_timestamp }}"
+        create: true
+        owner: "{{ backup_user | default('root') }}"
+        group: "{{ backup_group | default('root') }}"
+        mode: '0644'
+    
+    # Send notifications if enabled
+    - name: Send backup notification
+      include_tasks: "../tasks/send_notification.yml"
+      vars:
+        notification_subject: "Backup of {{ environment }} completed"
+        notification_body: "Successfully backed up {{ environment }} environment at {{ ansible_date_time.iso8601 }}"
+      when: enable_notifications | bool
+  
+  handlers:
+    - name: restart postgresql
+      service:
+        name: postgresql
+        state: restarted
+  
+  # Error handling for the entire playbook
+  rescue:
+    - name: Backup failed
+      debug:
+        msg: "Backup operation failed"
+    
+    - name: Log backup failure
+      lineinfile:
+        path: "{{ backup_base_dir }}/logs/backup.log"
+        line: "{{ ansible_date_time.iso8601 }} - Backup failed: timestamp={{ backup_timestamp }}"
+        create: true
+        owner: "{{ backup_user | default('root') }}"
+        group: "{{ backup_group | default('root') }}"
+        mode: '0644'
+    
+    - name: Send failure notification
+      include_tasks: "../tasks/send_notification.yml"
+      vars:
+        notification_subject: "ALERT: Backup of {{ environment }} failed"
+        notification_body: "Backup of {{ environment }} environment failed at {{ ansible_date_time.iso8601 }}. Please check the logs."
+      when: enable_notifications | bool
+  
+  # Default variables
+  vars:
+    app_user: app
+    app_group: app
+    db_user: postgres
+    db_group: postgres
+    app_base_dir: /opt/document-management
+    backup_base_dir: /opt/document-management/backups
+    environment: "{{ env | default('development') }}"
+    backup_database: true
+    backup_wal: true
+    backup_vector_indices: true
+    backup_documents: true
+    backup_config: true
+    compress_backups: true
+    verify_backups: true
+    cleanup_old_backups: true
+    backup_retention_days: 30
+    backup_disk_threshold: 80
+    use_cloud_storage: "{{ environment != 'development' }}"
+    enable_notifications: "{{ environment != 'development' }}"
