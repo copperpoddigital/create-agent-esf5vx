@@ -1,0 +1,395 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  AWS CloudFormation template for creating an Application Load Balancer (ALB) for the Document Management 
+  and AI Chatbot System. This template provisions a secure, highly available load balancer with appropriate 
+  security groups, listeners, target groups, and logging configuration.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Project Information
+        Parameters:
+          - ProjectName
+          - Environment
+          - VPCStackName
+          - S3StackName
+      - Label:
+          default: Load Balancer Configuration
+        Parameters:
+          - ContainerPort
+      - Label:
+          default: Security Configuration
+        Parameters:
+          - CertificateArn
+          - WebACLArn
+      - Label:
+          default: DNS Configuration
+        Parameters:
+          - CustomDomain
+          - HostedZoneId
+      - Label:
+          default: Monitoring Configuration
+        Parameters:
+          - SNSAlarmEmail
+    ParameterLabels:
+      ProjectName:
+        default: Project Name
+      Environment:
+        default: Environment
+      VPCStackName:
+        default: VPC Stack Name
+      S3StackName:
+        default: S3 Stack Name
+      ContainerPort:
+        default: Container Port
+      CertificateArn:
+        default: Certificate ARN
+      WebACLArn:
+        default: WAF Web ACL ARN
+      CustomDomain:
+        default: Custom Domain
+      HostedZoneId:
+        default: Hosted Zone ID
+      SNSAlarmEmail:
+        default: Alarm Email
+
+Parameters:
+  ProjectName:
+    Type: String
+    Description: Name of the project, used for resource naming and tagging
+    Default: docmgmt-chatbot
+  
+  Environment:
+    Type: String
+    Description: Deployment environment (dev, staging, prod)
+    Default: dev
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+  
+  VPCStackName:
+    Type: String
+    Description: Name of the VPC CloudFormation stack to import values from
+    Default: docmgmt-chatbot-vpc
+  
+  S3StackName:
+    Type: String
+    Description: Name of the S3 CloudFormation stack to import values from
+    Default: docmgmt-chatbot-s3
+  
+  ContainerPort:
+    Type: Number
+    Description: Port on which the container is listening
+    Default: 8000
+  
+  CertificateArn:
+    Type: String
+    Description: ARN of the ACM certificate for HTTPS
+    Default: ''
+  
+  WebACLArn:
+    Type: String
+    Description: ARN of the WAF Web ACL to associate with the ALB
+    Default: ''
+  
+  CustomDomain:
+    Type: String
+    Description: Custom domain name for the application
+    Default: ''
+  
+  HostedZoneId:
+    Type: String
+    Description: ID of the Route 53 hosted zone for the custom domain
+    Default: ''
+  
+  SNSAlarmEmail:
+    Type: String
+    Description: Email address to receive ALB alarm notifications
+    Default: ''
+
+Conditions:
+  IsProd: !Equals [!Ref Environment, 'prod']
+  IsStaging: !Equals [!Ref Environment, 'staging']
+  IsProdOrStaging: !Or [!Condition IsProd, !Condition IsStaging]
+  HasCertificate: !Not [!Equals [!Ref CertificateArn, '']]
+  HasWebACL: !Not [!Equals [!Ref WebACLArn, '']]
+  HasCustomDomain: !And [
+    !Not [!Equals [!Ref CustomDomain, '']],
+    !Not [!Equals [!Ref HostedZoneId, '']]
+  ]
+  HasAlarmEmail: !Not [!Equals [!Ref SNSAlarmEmail, '']]
+
+Resources:
+  # Security Group for ALB
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${ProjectName}-${Environment}-alb-sg
+      GroupDescription: Security group for the ALB
+      VpcId: !ImportValue 
+        Fn::Sub: ${VPCStackName}-VpcId
+      SecurityGroupIngress:
+        - Description: Allow HTTP from anywhere
+          IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - Description: Allow HTTPS from anywhere
+          IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - Description: Allow all outbound traffic
+          IpProtocol: '-1'
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-alb-sg
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # Application Load Balancer
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub ${ProjectName}-${Environment}-alb
+      Type: application
+      Scheme: internet-facing
+      IpAddressType: ipv4
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+      Subnets: !Split 
+        - ','
+        - !ImportValue 
+          Fn::Sub: ${VPCStackName}-PublicSubnets
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: '60'
+        - Key: routing.http2.enabled
+          Value: 'true'
+        - Key: access_logs.s3.enabled
+          Value: 'true'
+        - Key: access_logs.s3.bucket
+          Value: !ImportValue 
+            Fn::Sub: ${S3StackName}-LogBucketName
+        - Key: access_logs.s3.prefix
+          Value: 'alb-logs'
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-alb
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # Target Group
+  ApplicationTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub ${ProjectName}-${Environment}-tg
+      TargetType: ip
+      Protocol: HTTP
+      Port: !Ref ContainerPort
+      VpcId: !ImportValue 
+        Fn::Sub: ${VPCStackName}-VpcId
+      HealthCheckEnabled: true
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: /health/live
+      HealthCheckPort: traffic-port
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 3
+      UnhealthyThresholdCount: 3
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: '30'
+        - Key: slow_start.duration_seconds
+          Value: '60'
+        - Key: stickiness.enabled
+          Value: 'true'
+        - Key: stickiness.type
+          Value: 'lb_cookie'
+        - Key: stickiness.lb_cookie.duration_seconds
+          Value: '86400'
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-tg
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # HTTP Listener (redirects to HTTPS)
+  HTTPListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Protocol: HTTP
+      Port: 80
+      DefaultActions:
+        - Type: redirect
+          RedirectConfig:
+            Protocol: HTTPS
+            Port: '443'
+            StatusCode: HTTP_301
+
+  # HTTPS Listener
+  HTTPSListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Condition: HasCertificate
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Protocol: HTTPS
+      Port: 443
+      Certificates:
+        - CertificateArn: !Ref CertificateArn
+      SslPolicy: ELBSecurityPolicy-TLS-1-2-2017-01
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ApplicationTargetGroup
+
+  # WAF WebACL Association
+  WebACLAssociation:
+    Type: AWS::WAFv2::WebACLAssociation
+    Condition: HasWebACL
+    Properties:
+      ResourceArn: !Ref ApplicationLoadBalancer
+      WebACLArn: !Ref WebACLArn
+
+  # CloudWatch Alarm for 5XX Errors
+  HTTPCode5XXAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: IsProdOrStaging
+    Properties:
+      AlarmName: !Sub ${ProjectName}-${Environment}-alb-5xx-errors
+      AlarmDescription: Alarm when 5XX error rate exceeds threshold
+      Namespace: AWS/ApplicationELB
+      MetricName: HTTPCode_ELB_5XX_Count
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !GetAtt ApplicationLoadBalancer.LoadBalancerFullName
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 5
+      Threshold: 10
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !Ref SNSAlarmTopic
+      OKActions:
+        - !Ref SNSAlarmTopic
+
+  # CloudWatch Alarm for Target Response Time
+  TargetResponseTimeAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: IsProdOrStaging
+    Properties:
+      AlarmName: !Sub ${ProjectName}-${Environment}-alb-response-time
+      AlarmDescription: Alarm when target response time exceeds threshold
+      Namespace: AWS/ApplicationELB
+      MetricName: TargetResponseTime
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !GetAtt ApplicationLoadBalancer.LoadBalancerFullName
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 3
+      Threshold: 3
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !Ref SNSAlarmTopic
+      OKActions:
+        - !Ref SNSAlarmTopic
+
+  # SNS Topic for ALB Alarms
+  SNSAlarmTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub ${ProjectName}-${Environment}-alb-alarms
+      DisplayName: !Sub ${ProjectName} ${Environment} ALB Alarms
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-alb-alarms
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # SNS Subscription for ALB Alarms
+  SNSSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasAlarmEmail
+    Properties:
+      Protocol: email
+      TopicArn: !Ref SNSAlarmTopic
+      Endpoint: !Ref SNSAlarmEmail
+
+  # Route53 Record for Custom Domain (Optional)
+  DNSRecord:
+    Type: AWS::Route53::RecordSet
+    Condition: HasCustomDomain
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref CustomDomain
+      Type: A
+      AliasTarget:
+        HostedZoneId: !GetAtt ApplicationLoadBalancer.CanonicalHostedZoneID
+        DNSName: !GetAtt ApplicationLoadBalancer.DNSName
+        EvaluateTargetHealth: true
+
+Outputs:
+  LoadBalancerDnsName:
+    Description: DNS name of the Application Load Balancer
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
+    Export:
+      Name: !Sub ${AWS::StackName}-LoadBalancerDnsName
+
+  LoadBalancerArn:
+    Description: ARN of the Application Load Balancer
+    Value: !Ref ApplicationLoadBalancer
+    Export:
+      Name: !Sub ${AWS::StackName}-LoadBalancerArn
+  
+  TargetGroupArn:
+    Description: ARN of the target group
+    Value: !Ref ApplicationTargetGroup
+    Export:
+      Name: !Sub ${AWS::StackName}-TargetGroupArn
+  
+  AlbSecurityGroupId:
+    Description: ID of the ALB security group
+    Value: !Ref ALBSecurityGroup
+    Export:
+      Name: !Sub ${AWS::StackName}-AlbSecurityGroupId
+
+  LoadBalancerFullName:
+    Description: Full name of the load balancer for use in resource labels
+    Value: !GetAtt ApplicationLoadBalancer.LoadBalancerFullName
+    Export:
+      Name: !Sub ${AWS::StackName}-LoadBalancerFullName
+
+  LoadBalancerResourceLabel:
+    Description: Resource label for the load balancer for use in auto-scaling policies
+    Value: !Join 
+      - '/'
+      - - !GetAtt ApplicationLoadBalancer.LoadBalancerFullName
+        - !Ref ApplicationTargetGroup
+    Export:
+      Name: !Sub ${AWS::StackName}-LoadBalancerResourceLabel
+
+  TargetGroupResourceLabel:
+    Description: Resource label for the target group for use in auto-scaling policies
+    Value: !GetAtt ApplicationTargetGroup.TargetGroupFullName
+    Export:
+      Name: !Sub ${AWS::StackName}-TargetGroupResourceLabel
+
+  ApplicationURL:
+    Description: URL of the application
+    Value: !If 
+      - HasCustomDomain
+      - !Sub https://${CustomDomain}
+      - !Sub https://${ApplicationLoadBalancer.DNSName}
