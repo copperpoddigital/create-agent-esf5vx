@@ -1,0 +1,360 @@
+name: Continuous Deployment
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+    paths:
+      - src/backend/**
+      - infrastructure/**
+      - .github/workflows/cd.yml
+  workflow_run:
+    workflows: ["Continuous Integration"]
+    branches:
+      - main
+      - develop
+    types:
+      - completed
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'development'
+        type: choice
+        options:
+          - development
+          - staging
+          - production
+      version:
+        description: 'Version to deploy (tag, branch, or commit)'
+        required: true
+        default: 'develop'
+
+jobs:
+  build-and-push:
+    name: Build and push Docker image to Amazon ECR
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') || github.event_name == 'release'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          ref: ${{ github.event.workflow_dispatch.inputs.version || github.ref }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: docker/login-action@v2
+        with:
+          registry: ${{ secrets.ECR_REGISTRY }}
+          username: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          password: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Set environment variables
+        run: |
+          echo "ENVIRONMENT=$(if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then echo staging; elif [[ "${{ github.ref }}" == "refs/heads/develop" ]]; then echo development; elif [[ "${{ github.event_name }}" == "release" ]]; then echo production; else echo ${{ github.event.workflow_dispatch.inputs.environment }}; fi)" >> $GITHUB_ENV
+          echo "IMAGE_TAG=$(if [[ "${{ github.event_name }}" == "release" ]]; then echo ${{ github.event.release.tag_name }}; else echo ${{ github.sha }}; fi)" >> $GITHUB_ENV
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v4
+        with:
+          context: src/backend
+          push: true
+          tags: ${{ secrets.ECR_REGISTRY }}/${{ secrets.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }},${{ secrets.ECR_REGISTRY }}/${{ secrets.ECR_REPOSITORY }}:${{ env.ENVIRONMENT }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Save image tag to artifact
+        run: |
+          echo "${{ env.IMAGE_TAG }}" > image-tag.txt
+          echo "${{ env.ENVIRONMENT }}" > environment.txt
+        shell: bash
+
+      - name: Upload image tag artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: deployment-info
+          path: |
+            image-tag.txt
+            environment.txt
+
+  deploy-to-development:
+    name: Deploy to development environment
+    runs-on: ubuntu-latest
+    needs: [build-and-push]
+    if: github.ref == 'refs/heads/develop' || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'development') || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'develop')
+    environment:
+      name: development
+      url: https://dev-api.document-management.example.com
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Download deployment info
+        uses: actions/download-artifact@v3
+        with:
+          name: deployment-info
+
+      - name: Set environment variables
+        run: echo "IMAGE_TAG=$(cat image-tag.txt)" >> $GITHUB_ENV
+        shell: bash
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.4.6
+
+      - name: Terraform Init
+        run: cd infrastructure/terraform/environments/dev && terraform init
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Terraform Plan
+        run: cd infrastructure/terraform/environments/dev && terraform plan -var="container_image=${{ secrets.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}" -var="db_password=${{ secrets.DEV_DB_PASSWORD }}" -var="openai_api_key=${{ secrets.OPENAI_API_KEY }}" -out=tfplan
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Terraform Apply
+        run: cd infrastructure/terraform/environments/dev && terraform apply -auto-approve tfplan
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Wait for deployment to stabilize
+        run: sleep 60
+
+      - name: Run smoke tests
+        run: cd src/backend && python -m scripts.smoke_tests --environment development --api-url https://dev-api.document-management.example.com
+
+      - name: Notify deployment status
+        uses: slackapi/slack-github-action@v1.23.0
+        with:
+          channel-id: ${{ secrets.SLACK_CHANNEL_ID }}
+          slack-message: "Deployment to DEVELOPMENT environment ${{ job.status }} for commit ${{ env.IMAGE_TAG }}"
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+
+  deploy-to-staging:
+    name: Deploy to staging environment
+    runs-on: ubuntu-latest
+    needs: [build-and-push]
+    if: github.ref == 'refs/heads/main' || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'staging') || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main')
+    environment:
+      name: staging
+      url: https://staging-api.document-management.example.com
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Download deployment info
+        uses: actions/download-artifact@v3
+        with:
+          name: deployment-info
+
+      - name: Set environment variables
+        run: echo "IMAGE_TAG=$(cat image-tag.txt)" >> $GITHUB_ENV
+        shell: bash
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.4.6
+
+      - name: Terraform Init
+        run: cd infrastructure/terraform/environments/staging && terraform init
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Terraform Plan
+        run: cd infrastructure/terraform/environments/staging && terraform plan -var="container_image=${{ secrets.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}" -var="db_password=${{ secrets.STAGING_DB_PASSWORD }}" -var="openai_api_key=${{ secrets.OPENAI_API_KEY }}" -out=tfplan
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Terraform Apply
+        run: cd infrastructure/terraform/environments/staging && terraform apply -auto-approve tfplan
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Wait for deployment to stabilize
+        run: sleep 60
+
+      - name: Run smoke tests
+        run: cd src/backend && python -m scripts.smoke_tests --environment staging --api-url https://staging-api.document-management.example.com
+
+      - name: Run integration tests
+        run: cd src/backend && python -m scripts.integration_tests --environment staging --api-url https://staging-api.document-management.example.com
+
+      - name: Run performance tests
+        run: cd src/backend && python -m scripts.performance_tests --environment staging --api-url https://staging-api.document-management.example.com
+
+      - name: Notify deployment status
+        uses: slackapi/slack-github-action@v1.23.0
+        with:
+          channel-id: ${{ secrets.SLACK_CHANNEL_ID }}
+          slack-message: "Deployment to STAGING environment ${{ job.status }} for commit ${{ env.IMAGE_TAG }}"
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+
+  deploy-to-production:
+    name: Deploy to production environment
+    runs-on: ubuntu-latest
+    needs: [build-and-push]
+    if: github.event_name == 'release' && github.event.action == 'published' || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'production')
+    environment:
+      name: production
+      url: https://api.document-management.example.com
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Download deployment info
+        uses: actions/download-artifact@v3
+        with:
+          name: deployment-info
+
+      - name: Set environment variables
+        run: |
+          echo "IMAGE_TAG=$(cat image-tag.txt)" >> $GITHUB_ENV
+          echo "RELEASE_VERSION=$(if [[ "${{ github.event_name }}" == "release" ]]; then echo ${{ github.event.release.tag_name }}; else echo ${{ env.IMAGE_TAG }}; fi)" >> $GITHUB_ENV
+        shell: bash
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.4.6
+
+      - name: Terraform Init
+        run: cd infrastructure/terraform/environments/prod && terraform init
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Terraform Plan
+        run: cd infrastructure/terraform/environments/prod && terraform plan -var="container_image=${{ secrets.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}" -var="db_password=${{ secrets.PROD_DB_PASSWORD }}" -var="openai_api_key=${{ secrets.OPENAI_API_KEY }}" -out=tfplan
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Terraform Apply
+        run: cd infrastructure/terraform/environments/prod && terraform apply -auto-approve tfplan
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Wait for deployment to stabilize
+        run: sleep 60
+
+      - name: Run smoke tests
+        run: cd src/backend && python -m scripts.smoke_tests --environment production --api-url https://api.document-management.example.com
+
+      - name: Tag Docker image as latest
+        run: aws ecr batch-get-image --repository-name ${{ secrets.ECR_REPOSITORY }} --image-ids imageTag=${{ env.IMAGE_TAG }} --query 'images[].imageManifest' --output text | aws ecr put-image --repository-name ${{ secrets.ECR_REPOSITORY }} --image-tag latest --image-manifest "$MANIFEST"
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Create deployment record
+        run: |
+          echo "{ \"version\": \"${{ env.RELEASE_VERSION }}\", \"timestamp\": \"$(date -u +\"%Y-%m-%dT%H:%M:%SZ\")\", \"commit\": \"${{ github.sha }}\", \"environment\": \"production\" }" > deployment.json
+          aws s3 cp deployment.json s3://${{ secrets.DEPLOYMENT_BUCKET }}/deployments/$(date -u +"%Y-%m-%d")-${{ env.RELEASE_VERSION }}.json
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Notify deployment status
+        uses: slackapi/slack-github-action@v1.23.0
+        with:
+          channel-id: ${{ secrets.SLACK_CHANNEL_ID }}
+          slack-message: "Deployment to PRODUCTION environment ${{ job.status }} for version ${{ env.RELEASE_VERSION }}"
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+
+  rollback:
+    name: Rollback deployment if any stage fails
+    runs-on: ubuntu-latest
+    needs: [deploy-to-development, deploy-to-staging, deploy-to-production]
+    if: failure()
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Download deployment info
+        uses: actions/download-artifact@v3
+        with:
+          name: deployment-info
+
+      - name: Set environment variables
+        run: echo "ENVIRONMENT=$(cat environment.txt)" >> $GITHUB_ENV
+        shell: bash
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Get previous deployment
+        run: |
+          aws ecr describe-images --repository-name ${{ secrets.ECR_REPOSITORY }} --image-ids imageTag=${{ env.ENVIRONMENT }} --query 'imageDetails[0].imageTags[?@!=`${{ env.ENVIRONMENT }}`]' --output text > previous-tag.txt
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.4.6
+
+      - name: Rollback deployment
+        run: |
+          cd infrastructure/terraform/environments/${{ env.ENVIRONMENT == 'production' && 'prod' || env.ENVIRONMENT == 'staging' && 'staging' || 'dev' }} && terraform init && terraform plan -var="container_image=${{ secrets.ECR_REPOSITORY }}:$(cat ../../previous-tag.txt)" -var="db_password=${{ env.ENVIRONMENT == 'production' && secrets.PROD_DB_PASSWORD || env.ENVIRONMENT == 'staging' && secrets.STAGING_DB_PASSWORD || secrets.DEV_DB_PASSWORD }}" -var="openai_api_key=${{ secrets.OPENAI_API_KEY }}" -out=tfplan && terraform apply -auto-approve tfplan
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Notify rollback status
+        uses: slackapi/slack-github-action@v1.23.0
+        with:
+          channel-id: ${{ secrets.SLACK_CHANNEL_ID }}
+          slack-message: "⚠️ ROLLBACK performed for ${{ env.ENVIRONMENT }} environment due to deployment failure. Reverted to previous stable version."
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
