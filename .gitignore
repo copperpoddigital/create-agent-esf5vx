@@ -1,0 +1,103 @@
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env
+
+# IDE specific files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Testing and coverage
+.coverage
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+
+# Application specific
+data/documents/
+data/vector_indices/
+data/faiss_index/
+logs/
+
+# Docker
+.docker/
+
+# Temporary files
+*.log
+*.tmp
+tmp/
+
+# Poetry
+.poetry/
+poetry.toml
+
+# Local configuration overrides
+config.local.py
+
+# Secrets
+*.pem
+*.key
+
+# Database
+*.db
+*.sqlite
+
+# Terraform
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+*.tfvars
+*.tfvars.json
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+*.auto.tfvars
+*.auto.tfvars.json
+secrets.tfvars
+terraform.tfvars
+*.tfplan
+tfplan
+
+# OS specific files
+.DS_Store
+Thumbs.db
+
+# Node.js
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# Ansible
+*.retry
+
+# Monitoring
+prometheus/data/
+grafana/data/
+
+# Backup files
+*.bak
+*.backup
+
+# Local development files
+local-dev-config.yaml
+
+# Generated documentation
+docs/_build/
