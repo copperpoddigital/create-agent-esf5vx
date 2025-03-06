@@ -1,0 +1,220 @@
+version: '3.8'
+
+services:
+  app:
+    build:
+      context: ../../src/backend
+      dockerfile: Dockerfile
+    image: ${DOCKER_REGISTRY:-localhost}/doc-ai-chatbot:${IMAGE_TAG:-latest}
+    restart: always
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data/documents:/app/data/documents
+      - ./data/vector_indices:/app/data/vector_indices
+    environment:
+      - APP_ENV=production
+      - APP_DEBUG=false
+      - APP_API_V1_PREFIX=/api/v1
+      - APP_CORS_ALLOW_ORIGINS=${CORS_ORIGINS:-https://example.com}
+      - APP_LOG_LEVEL=INFO
+      - APP_RATE_LIMIT_PER_MINUTE=60
+      # Database settings
+      - DB_POSTGRES_USER=${DB_USER:-dbadmin}
+      - DB_POSTGRES_PASSWORD=${DB_PASSWORD}
+      - DB_POSTGRES_HOST=db
+      - DB_POSTGRES_PORT=5432
+      - DB_POSTGRES_DB=${DB_NAME:-document_management}
+      - DB_POOL_SIZE=10
+      - DB_MAX_OVERFLOW=20
+      - DB_POOL_TIMEOUT=30
+      - DB_ECHO_SQL=false
+      # Security settings
+      - SECURITY_JWT_SECRET=${JWT_SECRET}
+      - SECURITY_JWT_ALGORITHM=HS256
+      - SECURITY_ACCESS_TOKEN_EXPIRE_MINUTES=60
+      - SECURITY_REFRESH_TOKEN_EXPIRE_DAYS=7
+      # Vector settings
+      - VECTOR_VECTOR_INDEX_PATH=/app/data/vector_indices
+      - VECTOR_VECTOR_DIMENSION=768
+      - VECTOR_INDEX_TYPE=IVFFlat
+      - VECTOR_DEFAULT_TOP_K=5
+      - VECTOR_SIMILARITY_THRESHOLD=0.7
+      # Document settings
+      - DOCUMENT_DOCUMENT_STORAGE_PATH=/app/data/documents
+      - DOCUMENT_MAX_DOCUMENT_SIZE_MB=10
+      - DOCUMENT_ALLOWED_DOCUMENT_TYPES=application/pdf
+      # LLM settings
+      - LLM_OPENAI_API_KEY=${OPENAI_API_KEY}
+      - LLM_LLM_MODEL=gpt-3.5-turbo
+      - LLM_TEMPERATURE=0.7
+      - LLM_MAX_TOKENS=500
+      - LLM_CONTEXT_WINDOW_SIZE=4000
+      # Feedback settings
+      - FEEDBACK_ENABLE_FEEDBACK=true
+      - FEEDBACK_ENABLE_REINFORCEMENT_LEARNING=true
+    depends_on:
+      - db
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+        reservations:
+          cpus: '1'
+          memory: 2G
+      restart_policy:
+        condition: any
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "3"
+
+  db:
+    image: postgres:14
+    restart: always
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_USER=${DB_USER:-dbadmin}
+      - POSTGRES_PASSWORD=${DB_PASSWORD}
+      - POSTGRES_DB=${DB_NAME:-document_management}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-dbadmin}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 1G
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "3"
+
+  prometheus:
+    image: prom/prometheus:latest
+    restart: always
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./prometheus/rules:/etc/prometheus/rules
+      - prometheus_data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+      - --web.console.libraries=/etc/prometheus/console_libraries
+      - --web.console.templates=/etc/prometheus/consoles
+      - --web.enable-lifecycle
+    ports:
+      - "9090:9090"
+    depends_on:
+      - app
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  grafana:
+    image: grafana/grafana:latest
+    restart: always
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - ./grafana/dashboards:/var/lib/grafana/dashboards
+      - grafana_data:/var/lib/grafana
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_INSTALL_PLUGINS=grafana-piechart-panel
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  loki:
+    image: grafana/loki:latest
+    restart: always
+    volumes:
+      - ./loki/loki.yml:/etc/loki/loki.yml
+      - loki_data:/loki
+    command:
+      - -config.file=/etc/loki/loki.yml
+    ports:
+      - "3100:3100"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3100/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  node-exporter:
+    image: prom/node-exporter:latest
+    restart: always
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - --path.procfs=/host/proc
+      - --path.sysfs=/host/sys
+      - --path.rootfs=/rootfs
+      - --collector.filesystem.ignored-mount-points=^/(sys|proc|dev|host|etc)($$|/)
+    ports:
+      - "9100:9100"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9100/metrics"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:latest
+    restart: always
+    environment:
+      - DATA_SOURCE_NAME=postgresql://${DB_USER:-dbadmin}:${DB_PASSWORD}@db:5432/${DB_NAME:-document_management}?sslmode=disable
+    ports:
+      - "9187:9187"
+    depends_on:
+      - db
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9187/metrics"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  postgres_data:
+    # Persistent volume for PostgreSQL data storage
+  prometheus_data:
+    # Persistent volume for Prometheus metrics storage
+  grafana_data:
+    # Persistent volume for Grafana dashboards and configuration
+  loki_data:
+    # Persistent volume for Loki log storage
+
+networks:
+  app_network:
+    # Network for communication between application services
