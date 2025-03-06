@@ -1,0 +1,213 @@
+# Loki configuration version 2.7.x
+# This configuration is for centralizing log collection in the Document Management and AI Chatbot System
+
+# Authentication configuration
+auth_enabled: false
+
+# Server configuration
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 9096
+
+# Common configuration shared across components
+common:
+  path_prefix: /loki
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+# Schema configuration for storing logs
+schema_config:
+  configs:
+    - from: "2022-01-01"
+      store: boltdb-shipper
+      object_store: filesystem
+      schema: v12
+      index:
+        prefix: index_
+        period: 24h
+
+# Ruler configuration for alerting
+ruler:
+  alertmanager_url: http://alertmanager:9093
+  enable_api: true
+  enable_alertmanager_v2: true
+  storage:
+    type: local
+    local:
+      directory: /loki/rules
+  rule_path: /loki/rules-temp
+  ring:
+    kvstore:
+      store: inmemory
+
+# Analytics configuration
+analytics:
+  reporting_enabled: false
+
+# Limits configuration to prevent system overload
+limits_config:
+  enforce_metric_name: false
+  reject_old_samples: true
+  reject_old_samples_max_age: 168h
+  ingestion_rate_mb: 10
+  ingestion_burst_size_mb: 20
+  max_entries_limit_per_query: 10000
+  max_query_series: 1000
+  max_query_lookback: 168h
+
+# Compactor configuration for optimizing stored data
+compactor:
+  working_directory: /loki/compactor
+  shared_store: filesystem
+  compaction_interval: 10m
+  retention_enabled: true
+  retention_delete_delay: 2h
+  retention_delete_worker_count: 2
+  retention_period: 336h  # 14 days
+
+# Frontend configuration for handling queries
+frontend:
+  compress_responses: true
+  log_queries_longer_than: 10s
+  max_outstanding_per_tenant: 2048
+
+# Query range configuration
+query_range:
+  align_queries_with_step: true
+  cache_results: true
+  results_cache:
+    cache:
+      enable_fifocache: true
+      fifocache:
+        max_size_items: 1024
+        validity: 24h
+
+# Table manager configuration
+table_manager:
+  retention_deletes_enabled: true
+  retention_period: 336h  # 14 days
+
+# Log sources configuration
+# These define the components that will send logs to Loki
+log_sources:
+  - component: API Service
+    format: JSON
+    log_levels:
+      - ERROR
+      - WARNING
+      - INFO
+      - DEBUG
+    labels:
+      - service
+      - environment
+      - instance
+  
+  - component: Document Processor
+    format: JSON
+    log_levels:
+      - ERROR
+      - WARNING
+      - INFO
+      - DEBUG
+    labels:
+      - service
+      - environment
+      - instance
+  
+  - component: Vector Search
+    format: JSON
+    log_levels:
+      - ERROR
+      - WARNING
+      - INFO
+      - DEBUG
+    labels:
+      - service
+      - environment
+      - instance
+  
+  - component: Database
+    format: JSON
+    log_levels:
+      - ERROR
+      - WARNING
+      - INFO
+    labels:
+      - service
+      - environment
+      - instance
+  
+  - component: LLM Service
+    format: JSON
+    log_levels:
+      - ERROR
+      - WARNING
+      - INFO
+    labels:
+      - service
+      - environment
+      - instance
+
+# Integration points with other monitoring components
+integration_points:
+  - component: Grafana
+    integration_type: Data Source
+    url: http://loki:3100
+  
+  - component: Prometheus
+    integration_type: Metrics Exposure
+    url: http://prometheus:9090
+  
+  - component: Tempo
+    integration_type: Trace Correlation
+    url: http://tempo:3200
+  
+  - component: Alertmanager
+    integration_type: Alert Generation
+    url: http://alertmanager:9093
+
+# Retention policies for different log types
+retention_policies:
+  - log_type: Application Logs
+    retention_period: 14d
+  
+  - log_type: Error Logs
+    retention_period: 30d
+  
+  - log_type: Security Logs
+    retention_period: 90d
+  
+  - log_type: Audit Logs
+    retention_period: 365d
+
+# Alert rules for monitoring critical issues
+alert_rules:
+  - name: HighErrorRate
+    description: High rate of error logs
+    query: 'sum(count_over_time({job="api_service"} |= "ERROR"[5m])) > 10'
+    for: 5m
+    severity: critical
+  
+  - name: DocumentProcessingFailures
+    description: Multiple document processing failures
+    query: 'sum(count_over_time({job="document_processor"} |= "ERROR" |= "processing failed"[5m])) > 3'
+    for: 5m
+    severity: warning
+  
+  - name: DatabaseConnectionIssues
+    description: Database connection failures
+    query: 'sum(count_over_time({job="api_service"} |= "ERROR" |= "database connection"[5m])) > 3'
+    for: 5m
+    severity: critical
+  
+  - name: LLMServiceUnavailable
+    description: LLM service unavailable
+    query: 'sum(count_over_time({job="api_service"} |= "ERROR" |= "LLM service unavailable"[2m])) > 0'
+    for: 2m
+    severity: critical
