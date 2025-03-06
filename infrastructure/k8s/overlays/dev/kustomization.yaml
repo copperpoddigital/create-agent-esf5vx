@@ -1,0 +1,79 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Reference to base resources
+resources:
+- ../../base
+
+# Target namespace for all resources
+namespace: document-management-dev
+
+# Prefix for all resource names
+namePrefix: dev-
+
+# Common labels to apply to all resources
+commonLabels:
+  environment: development
+  app: document-management
+  managed-by: kustomize
+
+# Image customizations for the development environment
+images:
+- name: $(IMAGE_REPOSITORY)/document-management-app
+  newName: document-management-registry.dev/document-management-app
+  newTag: $(IMAGE_TAG)
+
+# Replica count overrides for development
+replicas:
+- name: document-management-app
+  count: 1
+
+# ConfigMap generation with development-specific settings
+configMapGenerator:
+- name: app-config
+  behavior: merge
+  literals:
+  - ENV=development
+  - DEBUG=true
+  - LOG_LEVEL=DEBUG
+  - POSTGRES_SERVER=postgres-dev-service
+  - POSTGRES_DB=document_management_dev
+  - POOL_SIZE=5
+  - MAX_OVERFLOW=10
+  - VECTOR_DIMENSION=768
+  - INDEX_TYPE=IVFFlat
+  - NLIST=100
+  - DEFAULT_TOP_K=5
+  - USE_GPU=false
+  - LLM_MODEL=gpt-3.5-turbo
+  - TEMPERATURE=0.7
+  - MAX_TOKENS=1024
+  - REQUEST_TIMEOUT=30
+  - USE_CACHE=true
+  - CACHE_TTL_SECONDS=3600
+  - MAX_DOCUMENT_SIZE_MB=10
+  - ENABLE_METRICS=true
+  - ALLOWED_HOSTS=*.dev.document-management.com,localhost
+
+# Secret generation for development environment
+secretGenerator:
+- name: app-secrets
+  behavior: merge
+  envs:
+  - dev-secrets.env
+
+# Strategic merge patches specific to the development environment
+patchesStrategicMerge:
+- patches/deployment-patch.yaml
+- patches/ingress-patch.yaml
+- patches/service-patch.yaml
+
+# Variables for reference in other resources
+vars:
+- name: INGRESS_HOST
+  objref:
+    kind: ConfigMap
+    name: app-config
+    apiVersion: v1
+  fieldref:
+    fieldpath: data.ALLOWED_HOSTS
