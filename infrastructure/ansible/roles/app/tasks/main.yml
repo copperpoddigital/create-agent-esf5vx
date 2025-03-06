@@ -1,0 +1,356 @@
+---
+# Ansible tasks file for the application role
+# This role installs, configures, and manages the Document Management and AI Chatbot System application
+
+# Install Docker and dependencies
+- name: Install required packages
+  apt:
+    name:
+      - apt-transport-https
+      - ca-certificates
+      - curl
+      - gnupg-agent
+      - software-properties-common
+      - python3-pip
+    state: present
+    update_cache: true
+  tags:
+    - app
+    - docker
+    - install
+
+- name: Add Docker GPG key
+  apt_key:
+    url: https://download.docker.com/linux/ubuntu/gpg
+    state: present
+  tags:
+    - app
+    - docker
+    - install
+
+- name: Add Docker repository
+  apt_repository:
+    repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+    state: present
+  tags:
+    - app
+    - docker
+    - install
+
+- name: Install Docker packages
+  apt:
+    name:
+      - docker-ce
+      - docker-ce-cli
+      - containerd.io
+    state: present
+    update_cache: true
+  tags:
+    - app
+    - docker
+    - install
+
+- name: Install Docker Compose
+  pip:
+    name: docker-compose
+    state: present
+  tags:
+    - app
+    - docker
+    - install
+
+- name: Ensure Docker service is running
+  service:
+    name: docker
+    state: started
+    enabled: true
+  tags:
+    - app
+    - docker
+    - service
+
+# Setup application user and directories
+- name: Create application user
+  user:
+    name: "{{ app_user }}"
+    group: "{{ app_group }}"
+    system: true
+    create_home: true
+    shell: /bin/bash
+  tags:
+    - app
+    - setup
+
+- name: Add application user to Docker group
+  user:
+    name: "{{ app_user }}"
+    groups: docker
+    append: true
+  tags:
+    - app
+    - docker
+    - setup
+
+- name: Create application base directory
+  file:
+    path: "{{ app_base_dir }}"
+    state: directory
+    owner: "{{ app_user }}"
+    group: "{{ app_group }}"
+    mode: '0755'
+  tags:
+    - app
+    - setup
+
+- name: Create application subdirectories
+  file:
+    path: "{{ app_base_dir }}/{{ item }}"
+    state: directory
+    owner: "{{ app_user }}"
+    group: "{{ app_group }}"
+    mode: '0755'
+  loop:
+    - releases
+    - data
+    - logs
+    - backups
+    - config
+  tags:
+    - app
+    - setup
+
+- name: Create data subdirectories
+  file:
+    path: "{{ app_base_dir }}/data/{{ item }}"
+    state: directory
+    owner: "{{ app_user }}"
+    group: "{{ app_group }}"
+    mode: '0755'
+  loop:
+    - documents
+    - vector_indices
+    - postgres
+    - prometheus
+    - grafana
+    - loki
+    - alertmanager
+  tags:
+    - app
+    - setup
+
+# Configure application
+- name: Copy Docker Compose template
+  template:
+    src: templates/docker-compose.yml.j2
+    dest: "{{ app_base_dir }}/config/docker-compose.yml"
+    owner: "{{ app_user }}"
+    group: "{{ app_group }}"
+    mode: '0644'
+  tags:
+    - app
+    - config
+
+- name: Copy environment file template
+  template:
+    src: templates/env.j2
+    dest: "{{ app_base_dir }}/config/.env"
+    owner: "{{ app_user }}"
+    group: "{{ app_group }}"
+    mode: '0600'
+  tags:
+    - app
+    - config
+
+- name: Copy application configuration files
+  template:
+    src: "templates/{{ item.src }}"
+    dest: "{{ app_base_dir }}/config/{{ item.dest }}"
+    owner: "{{ app_user }}"
+    group: "{{ app_group }}"
+    mode: "{{ item.mode | default('0644') }}"
+  loop:
+    - { src: 'prometheus.yml.j2', dest: 'prometheus.yml' }
+    - { src: 'logging.conf.j2', dest: 'logging.conf' }
+    - { src: 'loki.yml.j2', dest: 'loki.yml' }
+    - { src: 'alertmanager.yml.j2', dest: 'alertmanager.yml' }
+    - { src: 'promtail.yml.j2', dest: 'promtail.yml' }
+  tags:
+    - app
+    - config
+
+# Setup monitoring
+- name: Copy Grafana dashboards
+  copy:
+    src: files/dashboards/
+    dest: "{{ app_base_dir }}/config/dashboards/"
+    owner: "{{ app_user }}"
+    group: "{{ app_group }}"
+    mode: '0644'
+    directory_mode: '0755'
+  tags:
+    - app
+    - monitoring
+
+- name: Copy Grafana datasources
+  template:
+    src: templates/datasources.yml.j2
+    dest: "{{ app_base_dir }}/config/datasources.yml"
+    owner: "{{ app_user }}"
+    group: "{{ app_group }}"
+    mode: '0644'
+  tags:
+    - app
+    - monitoring
+
+# Deploy application
+- name: Pull application Docker image
+  community.docker.docker_image:
+    name: "{{ app_image }}:{{ app_version | default('latest') }}"
+    source: pull
+    force_source: true
+  when: app_image is defined
+  tags:
+    - app
+    - deploy
+
+# Create monitoring and maintenance scripts
+- name: Create application health check script
+  template:
+    src: templates/health_check.sh.j2
+    dest: /usr/local/bin/app_health_check.sh
+    owner: root
+    group: root
+    mode: '0755'
+  tags:
+    - app
+    - monitoring
+
+- name: Set up cron job for application health checks
+  cron:
+    name: "Application health check"
+    job: "/usr/local/bin/app_health_check.sh >> {{ app_base_dir }}/logs/health_check.log 2>&1"
+    minute: "*/5"
+    user: "{{ app_user }}"
+  tags:
+    - app
+    - monitoring
+
+- name: Create application backup script
+  template:
+    src: templates/backup_app.sh.j2
+    dest: /usr/local/bin/backup_app.sh
+    owner: root
+    group: root
+    mode: '0755'
+  tags:
+    - app
+    - backup
+
+- name: Set up cron job for application backups
+  cron:
+    name: "Application backup"
+    job: "/usr/local/bin/backup_app.sh >> {{ app_base_dir }}/logs/backup.log 2>&1"
+    hour: "1"
+    minute: "0"
+    user: root
+  tags:
+    - app
+    - backup
+
+- name: Create vector index rebuild script
+  template:
+    src: templates/rebuild_index.sh.j2
+    dest: /usr/local/bin/rebuild_index.sh
+    owner: "{{ app_user }}"
+    group: "{{ app_group }}"
+    mode: '0755'
+  tags:
+    - app
+    - maintenance
+
+- name: Set up cron job for weekly vector index optimization
+  cron:
+    name: "Vector index optimization"
+    job: "/usr/local/bin/rebuild_index.sh >> {{ app_base_dir }}/logs/rebuild_index.log 2>&1"
+    hour: "3"
+    minute: "0"
+    weekday: "0"
+    user: "{{ app_user }}"
+  tags:
+    - app
+    - maintenance
+
+# Configure logging
+- name: Configure log rotation for application logs
+  template:
+    src: templates/app_logrotate.j2
+    dest: /etc/logrotate.d/document_management_app
+    owner: root
+    group: root
+    mode: '0644'
+  tags:
+    - app
+    - logging
+
+# Create and configure systemd service
+- name: Create application systemd service
+  template:
+    src: templates/app.service.j2
+    dest: /etc/systemd/system/document-management.service
+    owner: root
+    group: root
+    mode: '0644'
+  notify:
+    - reload systemd
+    - restart application
+  tags:
+    - app
+    - service
+
+- name: Enable application service
+  systemd:
+    name: document-management
+    enabled: true
+    state: started
+  tags:
+    - app
+    - service
+
+# Configure firewall
+- name: Configure firewall for application
+  ufw:
+    rule: allow
+    port: "{{ item }}"
+    proto: tcp
+  loop:
+    - '8000'  # FastAPI
+    - '3000'  # Grafana
+    - '9090'  # Prometheus
+    - '9093'  # Alertmanager
+    - '3100'  # Loki
+  tags:
+    - app
+    - security
+
+# Additional utility scripts
+- name: Create application status check script
+  template:
+    src: templates/check_app_status.sh.j2
+    dest: /usr/local/bin/check_app_status.sh
+    owner: root
+    group: root
+    mode: '0755'
+  tags:
+    - app
+    - monitoring
+
+- name: Create application deployment script
+  template:
+    src: templates/deploy_app.sh.j2
+    dest: /usr/local/bin/deploy_app.sh
+    owner: "{{ app_user }}"
+    group: "{{ app_group }}"
+    mode: '0755'
+  tags:
+    - app
+    - deployment
