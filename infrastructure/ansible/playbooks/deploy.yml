@@ -1,0 +1,309 @@
+---
+# Ansible playbook for deploying the Document Management and AI Chatbot System
+# This playbook handles application deployment, configuration, database migrations,
+# and post-deployment verification with support for blue/green deployment strategy
+# and rollback capabilities.
+
+- name: Deploy Document Management and AI Chatbot System
+  hosts: "{{ target_hosts | default('app_servers') }}"
+  become: true
+  vars_files:
+    - ../vars/main.yml
+    - "../vars/{{ environment }}.yml"
+
+  pre_tasks:
+    - name: Create deployment timestamp
+      set_fact:
+        deployment_timestamp: "{{ ansible_date_time.iso8601_basic_short }}"
+
+    - name: Create release directory
+      file:
+        path: "{{ app_base_dir }}/releases/{{ deployment_timestamp }}"
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        mode: '0755'
+
+    - name: Check if current symlink exists
+      stat:
+        path: "{{ app_base_dir }}/current"
+      register: current_symlink
+
+    - name: Record previous release
+      set_fact:
+        previous_release: "{{ lookup('readlink', app_base_dir + '/current') }}"
+      when: current_symlink.stat.exists and current_symlink.stat.islnk
+
+    - name: Check application status before deployment
+      uri:
+        url: "http://localhost:{{ app_port }}/api/v1/health/live"
+        status_code: 200
+      register: pre_deploy_health
+      ignore_errors: true
+      when: current_symlink.stat.exists
+
+  tasks:
+    - name: Application Deployment Tasks
+      block:
+        - name: Pull application Docker image
+          community.docker.docker_image:
+            name: "{{ app_image }}:{{ app_version | default('latest') }}"
+            source: pull
+            force_source: true
+          when: app_image is defined
+
+        - name: Copy Docker Compose file
+          template:
+            src: ../templates/docker-compose.yml.j2
+            dest: "{{ app_base_dir }}/releases/{{ deployment_timestamp }}/docker-compose.yml"
+            owner: "{{ app_user }}"
+            group: "{{ app_group }}"
+            mode: '0644'
+
+        - name: Copy environment file
+          template:
+            src: ../templates/env.j2
+            dest: "{{ app_base_dir }}/releases/{{ deployment_timestamp }}/.env"
+            owner: "{{ app_user }}"
+            group: "{{ app_group }}"
+            mode: '0600'
+
+        - name: Copy application configuration files
+          copy:
+            src: "{{ item.src }}"
+            dest: "{{ app_base_dir }}/releases/{{ deployment_timestamp }}/{{ item.dest }}"
+            owner: "{{ app_user }}"
+            group: "{{ app_group }}"
+            mode: "{{ item.mode | default('0644') }}"
+          with_items: "{{ config_files }}"
+
+        - name: Create data directories symlinks
+          file:
+            src: "{{ app_base_dir }}/data/{{ item }}"
+            dest: "{{ app_base_dir }}/releases/{{ deployment_timestamp }}/data/{{ item }}"
+            state: link
+            owner: "{{ app_user }}"
+            group: "{{ app_group }}"
+          loop:
+            - documents
+            - vector_indices
+      tags:
+        - deploy
+        - app
+
+    - name: Database Migration Tasks
+      block:
+        - name: Create database backup before migration
+          community.postgresql.postgresql_db:
+            name: "{{ db_name }}"
+            state: dump
+            target: "{{ app_base_dir }}/backups/database/pre_migration_{{ deployment_timestamp }}.sql"
+            login_host: "{{ db_host }}"
+            login_user: "{{ db_user }}"
+            login_password: "{{ db_password }}"
+            port: "{{ db_port | default('5432') }}"
+          when: run_migrations | bool and backup_before_migration | bool
+
+        - name: Run database migrations
+          community.docker.docker_compose:
+            project_src: "{{ app_base_dir }}/releases/{{ deployment_timestamp }}"
+            command: run --rm app alembic upgrade head
+          when: run_migrations | bool
+      when: run_migrations | bool
+      tags:
+        - deploy
+        - migrations
+
+    - name: Blue/Green Deployment Tasks
+      block:
+        - name: Start new application version
+          community.docker.docker_compose:
+            project_src: "{{ app_base_dir }}/releases/{{ deployment_timestamp }}"
+            state: present
+
+        - name: Wait for new application to be ready
+          uri:
+            url: "http://localhost:{{ app_port }}/api/v1/health/ready"
+            status_code: 200
+          register: health_check
+          retries: 10
+          delay: 5
+          until: health_check.status == 200
+
+        - name: Update current symlink to new release
+          file:
+            src: "{{ app_base_dir }}/releases/{{ deployment_timestamp }}"
+            dest: "{{ app_base_dir }}/current"
+            state: link
+            owner: "{{ app_user }}"
+            group: "{{ app_group }}"
+
+        - name: Stop previous application version
+          community.docker.docker_compose:
+            project_src: "{{ previous_release }}"
+            state: absent
+            remove_images: local
+            remove_volumes: false
+          when: current_symlink.stat.exists and current_symlink.stat.islnk and previous_release is defined
+      tags:
+        - deploy
+        - blue-green
+
+    - name: Cleanup Old Releases
+      block:
+        - name: Find old releases
+          find:
+            paths: "{{ app_base_dir }}/releases"
+            file_type: directory
+            patterns: '*'
+            excludes: "{{ deployment_timestamp }}"
+          register: old_releases
+
+        - name: Sort releases by name
+          set_fact:
+            sorted_releases: "{{ old_releases.files | sort(attribute='path') }}"
+
+        - name: Get releases to remove
+          set_fact:
+            releases_to_remove: "{{ sorted_releases[0:-keep_releases|int] if sorted_releases|length > keep_releases|int else [] }}"
+
+        - name: Remove old releases
+          file:
+            path: "{{ item.path }}"
+            state: absent
+          with_items: "{{ releases_to_remove }}"
+      when: cleanup_old_releases | bool
+      tags:
+        - deploy
+        - cleanup
+
+    - name: Vector Index Rebuild Tasks
+      block:
+        - name: Backup existing vector indices
+          archive:
+            path: "{{ app_base_dir }}/data/vector_indices"
+            dest: "{{ app_base_dir }}/backups/vector_indices/pre_rebuild_{{ deployment_timestamp }}.tar.gz"
+            format: gz
+
+        - name: Run vector index rebuild
+          community.docker.docker_compose:
+            project_src: "{{ app_base_dir }}/current"
+            command: run --rm app python -m scripts.rebuild_index
+      when: force_rebuild | bool
+      tags:
+        - deploy
+        - rebuild
+
+  post_tasks:
+    - name: Verify deployment success
+      uri:
+        url: "http://localhost:{{ app_port }}/api/v1/health/live"
+        status_code: 200
+      register: post_deploy_health
+      retries: 3
+      delay: 10
+      until: post_deploy_health.status == 200
+
+    - name: Log deployment completion
+      lineinfile:
+        path: "{{ app_base_dir }}/logs/deployment.log"
+        line: "{{ ansible_date_time.iso8601 }} - Deployment completed successfully: version={{ app_version | default('latest') }}, release={{ deployment_timestamp }}"
+        create: true
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        mode: '0644'
+
+    - name: Send deployment notification
+      include_tasks: ../tasks/send_notification.yml
+      vars:
+        notification_subject: "Deployment to {{ environment }} completed"
+        notification_body: "Successfully deployed version {{ app_version | default('latest') }} to {{ environment }} environment at {{ ansible_date_time.iso8601 }}"
+      when: enable_notifications | bool
+
+  handlers:
+    - name: restart application
+      community.docker.docker_compose:
+        project_src: "{{ app_base_dir }}/current"
+        restarted: true
+
+  rescue:
+    - name: Deployment failed
+      debug:
+        msg: "Deployment failed, initiating rollback"
+
+    - name: Rollback to previous version
+      block:
+        - name: Check if previous release exists
+          stat:
+            path: "{{ previous_release }}"
+          register: previous_release_check
+          when: previous_release is defined
+
+        - name: Stop failed deployment
+          community.docker.docker_compose:
+            project_src: "{{ app_base_dir }}/releases/{{ deployment_timestamp }}"
+            state: absent
+            remove_images: local
+            remove_volumes: false
+
+        - name: Restore previous version
+          community.docker.docker_compose:
+            project_src: "{{ previous_release }}"
+            state: present
+          when: previous_release is defined and previous_release_check.stat.exists
+
+        - name: Restore current symlink
+          file:
+            src: "{{ previous_release }}"
+            dest: "{{ app_base_dir }}/current"
+            state: link
+            owner: "{{ app_user }}"
+            group: "{{ app_group }}"
+          when: previous_release is defined and previous_release_check.stat.exists
+
+        - name: Verify rollback success
+          uri:
+            url: "http://localhost:{{ app_port }}/api/v1/health/live"
+            status_code: 200
+          register: rollback_health
+          retries: 3
+          delay: 10
+          until: rollback_health.status == 200
+          when: previous_release is defined and previous_release_check.stat.exists
+      when: previous_release is defined
+
+    - name: Send rollback notification
+      include_tasks: ../tasks/send_notification.yml
+      vars:
+        notification_subject: "ALERT: Deployment to {{ environment }} failed"
+        notification_body: "Deployment of version {{ app_version | default('latest') }} to {{ environment }} failed. Rollback to previous version was {{ 'successful' if (rollback_health.status|default(0) == 200) else 'unsuccessful' }}."
+      when: enable_notifications | bool
+
+    - name: Log deployment failure
+      lineinfile:
+        path: "{{ app_base_dir }}/logs/deployment.log"
+        line: "{{ ansible_date_time.iso8601 }} - Deployment failed: version={{ app_version | default('latest') }}, release={{ deployment_timestamp }}. Rollback {{ 'successful' if (rollback_health.status|default(0) == 200) else 'unsuccessful' }}."
+        create: true
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        mode: '0644'
+
+  vars:
+    app_user: app
+    app_group: app
+    app_base_dir: /opt/document-management
+    environment: "{{ env | default('development') }}"
+    app_port: 8000
+    keep_releases: 5
+    run_migrations: true
+    backup_before_migration: true
+    force_rebuild: false
+    cleanup_old_releases: true
+    enable_notifications: "{{ environment != 'development' }}"
+    config_files:
+      - src: ../files/prometheus.yml
+        dest: prometheus.yml
+        mode: '0644'
+      - src: ../files/logging.conf
+        dest: logging.conf
+        mode: '0644'
