@@ -1,0 +1,389 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  S3 Storage Infrastructure for Document Management and AI Chatbot System.
+  Creates secure buckets for document storage, access logging, and application artifacts
+  with appropriate encryption, lifecycle policies, and access controls.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Project Information
+        Parameters:
+          - ProjectName
+          - Environment
+          - VPCStackName
+      - Label:
+          default: Bucket Configuration
+        Parameters:
+          - ApplicationLoadBalancerDnsName
+          - CustomDomain
+          - CreateVPCEndpoint
+      - Label:
+          default: Lifecycle Configuration
+        Parameters:
+          - StandardIATransitionDays
+          - GlacierTransitionDays
+          - NoncurrentVersionExpirationDays
+          - LogRetentionDays
+      - Label:
+          default: Monitoring Configuration
+        Parameters:
+          - BucketSizeThreshold
+          - SNSAlarmEmail
+    ParameterLabels:
+      ProjectName:
+        default: Project Name
+      Environment:
+        default: Environment
+      VPCStackName:
+        default: VPC Stack Name
+      ApplicationLoadBalancerDnsName:
+        default: ALB DNS Name
+      CustomDomain:
+        default: Custom Domain
+      StandardIATransitionDays:
+        default: Days to Standard-IA
+      GlacierTransitionDays:
+        default: Days to Glacier
+      NoncurrentVersionExpirationDays:
+        default: Days to Delete Old Versions
+      LogRetentionDays:
+        default: Log Retention Days
+      BucketSizeThreshold:
+        default: Bucket Size Threshold (bytes)
+      CreateVPCEndpoint:
+        default: Create VPC Endpoint
+      SNSAlarmEmail:
+        default: Alarm Email
+
+Parameters:
+  ProjectName:
+    Type: String
+    Description: Name of the project, used for resource naming and tagging
+    Default: docmgmt-chatbot
+  
+  Environment:
+    Type: String
+    Description: Deployment environment (dev, staging, prod)
+    Default: dev
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+  
+  VPCStackName:
+    Type: String
+    Description: Name of the VPC CloudFormation stack to import values from
+    Default: docmgmt-chatbot-vpc
+  
+  ApplicationLoadBalancerDnsName:
+    Type: String
+    Description: DNS name of the Application Load Balancer for CORS configuration
+    Default: ''
+  
+  CustomDomain:
+    Type: String
+    Description: Custom domain name for the application (for CORS configuration)
+    Default: ''
+  
+  StandardIATransitionDays:
+    Type: Number
+    Description: Number of days after which objects are transitioned to STANDARD_IA storage class
+    Default: 30
+    MinValue: 30
+    MaxValue: 365
+  
+  GlacierTransitionDays:
+    Type: Number
+    Description: Number of days after which objects are transitioned to GLACIER storage class
+    Default: 90
+    MinValue: 90
+    MaxValue: 730
+  
+  NoncurrentVersionExpirationDays:
+    Type: Number
+    Description: Number of days after which noncurrent object versions are removed
+    Default: 365
+    MinValue: 90
+    MaxValue: 3650
+  
+  LogRetentionDays:
+    Type: Number
+    Description: Number of days to retain logs in the log bucket
+    Default: 90
+    MinValue: 30
+    MaxValue: 3650
+  
+  BucketSizeThreshold:
+    Type: Number
+    Description: Threshold in bytes for bucket size alarm
+    Default: 5368709120  # 5GB
+    MinValue: 1073741824  # 1GB
+  
+  CreateVPCEndpoint:
+    Type: String
+    Description: Whether to create a VPC endpoint for S3
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+  
+  SNSAlarmEmail:
+    Type: String
+    Description: Email address to receive S3 alarm notifications
+    Default: ''
+
+Conditions:
+  IsProd: !Equals [!Ref Environment, 'prod']
+  IsStaging: !Equals [!Ref Environment, 'staging']
+  IsProdOrStaging: !Or [!Condition IsProd, !Condition IsStaging]
+  HasCustomDomain: !Not [!Equals [!Ref CustomDomain, '']]
+  CreateVPCEndpoint: !Equals [!Ref CreateVPCEndpoint, 'true']
+  HasAlarmEmail: !Not [!Equals [!Ref SNSAlarmEmail, '']]
+
+Resources:
+  # Log Bucket
+  LogBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${ProjectName}-${Environment}-logs-${AWS::AccountId}
+      AccessControl: LogDeliveryWrite
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireOldLogs
+            Status: Enabled
+            ExpirationInDays: !Ref LogRetentionDays
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-logs
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: ManagedBy
+          Value: CloudFormation
+  
+  # Log Bucket Policy
+  LogBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref LogBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowSSLRequestsOnly
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !Sub 'arn:aws:s3:::${LogBucket}'
+              - !Sub 'arn:aws:s3:::${LogBucket}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+          - Sid: AllowELBLogDelivery
+            Effect: Allow
+            Principal:
+              Service: delivery.logs.amazonaws.com
+            Action: 's3:PutObject'
+            Resource: !Sub 'arn:aws:s3:::${LogBucket}/*'
+            Condition:
+              StringEquals:
+                's3:x-amz-acl': 'bucket-owner-full-control'
+  
+  # Document Bucket
+  DocumentBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${ProjectName}-${Environment}-documents-${AWS::AccountId}
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: TransitionToStandardIA
+            Status: Enabled
+            Transitions:
+              - Days: !Ref StandardIATransitionDays
+                StorageClass: STANDARD_IA
+          - Id: TransitionToGlacier
+            Status: Enabled
+            Transitions:
+              - Days: !Ref GlacierTransitionDays
+                StorageClass: GLACIER
+            NoncurrentVersionExpiration:
+              NoncurrentDays: !Ref NoncurrentVersionExpirationDays
+      LoggingConfiguration:
+        DestinationBucketName: !Ref LogBucket
+        LogFilePrefix: document-bucket-logs/
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders:
+              - '*'
+            AllowedMethods:
+              - GET
+              - PUT
+              - POST
+              - DELETE
+              - HEAD
+            AllowedOrigins:
+              - !If
+                - HasCustomDomain
+                - !Ref CustomDomain
+                - !Sub 'https://${ApplicationLoadBalancerDnsName}'
+            ExposedHeaders:
+              - ETag
+            MaxAge: 3000
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-documents
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: ManagedBy
+          Value: CloudFormation
+  
+  # Document Bucket Policy
+  DocumentBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref DocumentBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowSSLRequestsOnly
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !Sub 'arn:aws:s3:::${DocumentBucket}'
+              - !Sub 'arn:aws:s3:::${DocumentBucket}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+  
+  # VPC Endpoint for S3
+  S3VPCEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateVPCEndpoint
+    Properties:
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.s3
+      VpcId: !ImportValue 
+        Fn::Sub: ${VPCStackName}-VpcId
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action:
+              - 's3:GetObject'
+              - 's3:PutObject'
+              - 's3:ListBucket'
+              - 's3:DeleteObject'
+            Resource:
+              - !Sub 'arn:aws:s3:::${DocumentBucket}'
+              - !Sub 'arn:aws:s3:::${DocumentBucket}/*'
+              - !Sub 'arn:aws:s3:::${LogBucket}'
+              - !Sub 'arn:aws:s3:::${LogBucket}/*'
+  
+  # CloudWatch Alarm for Document Bucket Size
+  DocumentBucketSizeAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: IsProdOrStaging
+    Properties:
+      AlarmName: !Sub ${ProjectName}-${Environment}-document-bucket-size
+      AlarmDescription: Alarm when document bucket size exceeds threshold
+      Namespace: AWS/S3
+      MetricName: BucketSizeBytes
+      Dimensions:
+        - Name: BucketName
+          Value: !Ref DocumentBucket
+        - Name: StorageType
+          Value: StandardStorage
+      Statistic: Maximum
+      Period: 86400  # 1 day
+      EvaluationPeriods: 1
+      Threshold: !Ref BucketSizeThreshold
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !Ref SNSAlarmTopic
+      InsufficientDataActions:
+        - !Ref SNSAlarmTopic
+
+  # SNS Topic for alarms
+  SNSAlarmTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub ${ProjectName}-${Environment}-s3-alarms
+      DisplayName: !Sub ${ProjectName} ${Environment} S3 Alarms
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-s3-alarms
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+  
+  # SNS Subscription for alarms
+  SNSAlarmSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasAlarmEmail
+    Properties:
+      Protocol: email
+      TopicArn: !Ref SNSAlarmTopic
+      Endpoint: !Ref SNSAlarmEmail
+
+Outputs:
+  DocumentBucketName:
+    Description: Name of the document storage bucket
+    Value: !Ref DocumentBucket
+    Export:
+      Name: !Sub ${AWS::StackName}-DocumentBucketName
+  
+  DocumentBucketArn:
+    Description: ARN of the document storage bucket
+    Value: !GetAtt DocumentBucket.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-DocumentBucketArn
+  
+  LogBucketName:
+    Description: Name of the log bucket
+    Value: !Ref LogBucket
+    Export:
+      Name: !Sub ${AWS::StackName}-LogBucketName
+  
+  LogBucketArn:
+    Description: ARN of the log bucket
+    Value: !GetAtt LogBucket.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-LogBucketArn
+  
+  S3VPCEndpointId:
+    Description: ID of the S3 VPC endpoint
+    Value: !If [CreateVPCEndpoint, !Ref S3VPCEndpoint, '']
+    Condition: CreateVPCEndpoint
+    Export:
+      Name: !Sub ${AWS::StackName}-S3VPCEndpointId
